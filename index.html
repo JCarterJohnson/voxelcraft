@@ -689,19 +689,37 @@ const Blocks = {
     tile('zombie_skin', c => { blotch(c, [76, 122, 70], 26, 321, 4); speckle(c, [52, 90, 50], 16, 322, 1); });
     tile('zombie_face', c => { blotch(c, [76, 122, 70], 22, 323, 3); c.fillStyle = '#0a0c0a'; c.fillRect(3, 6, 3, 3); c.fillRect(10, 6, 3, 3); c.fillStyle = '#243524'; c.fillRect(4, 11, 8, 1); });
     tile('xp_gem', c => { c.clearRect(0, 0, T, T); c.fillStyle = '#6cff4a'; c.fillRect(2, 2, T - 4, T - 4); c.fillStyle = '#caffb0'; c.fillRect(5, 4, 4, 4); });
-    tile('eye_glow', c => { c.fillStyle = '#ff2a14'; c.fillRect(0, 0, T, T); c.fillStyle = '#ffd9a0'; c.fillRect(5, 5, 6, 6); });
-    // the monster's eye: the real photographic eye PNG the player supplied (loaded into
-    // PACK_IMG before the atlas builds), drawn into the tile. Rendered emissive so the
-    // dark eye + bright catchlights glow like eyeshine in the dark.
+    // a ROUND emissive glow blob on a TRANSPARENT field (was a full red square, which read
+    // as a lit rectangle in the dark). Rendered alpha-cutout so only the disc shows.
+    tile('eye_glow', c => {
+      c.clearRect(0, 0, T, T);
+      const g = c.createRadialGradient(8, 8, 0.5, 8, 8, 7.6);
+      g.addColorStop(0, '#ffe6c0'); g.addColorStop(0.34, '#ff7a3c'); g.addColorStop(0.72, '#d11808'); g.addColorStop(1, 'rgba(150,8,4,0)');
+      c.fillStyle = g; c.beginPath(); c.arc(8, 8, 7.6, 0, Math.PI * 2); c.fill();
+    });
+    // the monster's eye: the real photographic eye PNG, but with its dark surround + the
+    // square corners knocked out to TRANSPARENT (only the bright eyeshine survives) so in
+    // the dark you see a glowing eye, NOT the lit rectangle the box used to show.
     tile('eye', c => {
       c.clearRect(0, 0, T, T);
       if (window.PACK_IMG && PACK_IMG.eye) {
-        c.imageSmoothingEnabled = true;
-        c.drawImage(PACK_IMG.eye, 0, 0, T, T);                 // the real eye, downscaled to fill the tile
-        c.imageSmoothingEnabled = false;
+        const tmp = document.createElement('canvas'); tmp.width = T; tmp.height = T;
+        const tc = tmp.getContext('2d'); tc.imageSmoothingEnabled = true;
+        tc.drawImage(PACK_IMG.eye, 0, 0, T, T);
+        const im = tc.getImageData(0, 0, T, T), d = im.data;
+        for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) {
+          const p = (y * T + x) * 4;
+          const lum = (d[p] * 0.3 + d[p + 1] * 0.59 + d[p + 2] * 0.11) / 255;
+          const rad = Math.hypot(x - 7.5, y - 7.5) / 7.6;       // circular mask -> no square corners
+          const keep = (lum > 0.26 && rad < 1.0);               // bright eyeshine inside the disc only
+          d[p + 3] = keep ? 255 : 0;
+          // lift kept pixels to a strong eyeshine GLOW (emissive caps at ~tex*0.78, so push near-white/amber)
+          if (keep) { d[p] = Math.min(255, 138 + d[p] * 0.85); d[p + 1] = Math.min(255, 130 + d[p + 1] * 0.85); d[p + 2] = Math.min(255, 118 + d[p + 2] * 0.85); }
+        }
+        tc.putImageData(im, 0, 0); c.drawImage(tmp, 0, 0);
       } else {                                                  // fallback if the file is missing
-        c.fillStyle = '#0b0b0e'; c.fillRect(0, 0, T, T);
-        c.fillStyle = '#cfd6e0'; c.beginPath(); c.arc(8, 8, 2.0, 0, Math.PI * 2); c.fill();
+        const g = c.createRadialGradient(8, 8, 0.5, 8, 8, 5); g.addColorStop(0, '#eef3ff'); g.addColorStop(1, 'rgba(180,200,255,0)');
+        c.fillStyle = g; c.beginPath(); c.arc(8, 8, 5, 0, Math.PI * 2); c.fill();
       }
     });
     // ---- wet red maw flesh (the gaping mouth's fleshy flaps): mottled red + pale fangs ----
@@ -1327,6 +1345,18 @@ class Renderer {
     const gl = this.gl;
     gl.disable(gl.CULL_FACE);
     this.drawDynamic(verts, idx);
+    gl.enable(gl.CULL_FACE);
+  }
+
+  // the creature's glowing eyes + maw: alpha-CUTOUT so only the painted glow shows and the
+  // transparent rest of each box is discarded (no lit rectangle around the eyes), double-sided
+  drawDynamicGlow(verts, idx) {
+    if (idx.length === 0) return;
+    const gl = this.gl;
+    gl.disable(gl.CULL_FACE);
+    gl.uniform1f(this.uni.uAlphaTest, 1.0);
+    this.drawDynamic(verts, idx);
+    gl.uniform1f(this.uni.uAlphaTest, 0.0);
     gl.enable(gl.CULL_FACE);
   }
 
@@ -2477,7 +2507,7 @@ class AudioEngine {
     if (!el) return;
     const lv = clamp(this._horrorLv || 0, 0, 1);
     const node = el.cloneNode();                                  // a fresh element so overlapping screams don't cut each other
-    node.volume = Math.max(0, Math.min(1, (0.55 + lv * 0.45) * this.volume));
+    node.volume = Math.max(0, Math.min(1, (0.12 + lv * lv * 0.92) * this.volume));  // faint far -> loud as you approach
     node.play().catch(() => {});
   }
   startHorror() {
@@ -2488,8 +2518,8 @@ class AudioEngine {
       let interval = 14000;
       // one scream at a time, well spaced (~8-22s) so the clips don't pile up; a touch
       // more frequent when it's near, but never a cacophony
-      if (lv > 0.06) { this._playScream(); interval = 11000 + Math.random() * 11000 - lv * 3000; }
-      this._horror = setTimeout(step, Math.max(8000, interval));
+      if (lv > 0.05) { this._playScream(); interval = (9000 + Math.random() * 9000) * (1 - 0.5 * lv); }   // nearer -> more frequent too
+      this._horror = setTimeout(step, Math.max(4500, interval));
     };
     this._horror = setTimeout(step, 6000 + Math.random() * 6000);   // don't scream the instant night falls
   }
@@ -3922,6 +3952,7 @@ class Stalker {
     this.hang = 0; this.crawlA = 0;
     this.drape = 0;                           // 0..1: canopy curl — body pours over the rim, head/torso draped down
     this.canopyDir = null; this.peekY = 0;    // latched player-facing rim dir; sunk feet-Y for a clear-of-leaves peek
+    this.crawl = 0; this.gait = 0; this._scrambleT = 0;   // 0..1 crawl-run pose blend + the limb gait phase (the kill scramble)
     this.loom = 0;                            // 0..1: bend the upper body forward+down (the downed jumpscare)
   }
 
@@ -4156,9 +4187,9 @@ class Stalker {
     if (this.modeT <= 0 && !this.hunting) this._pickMode(player);
 
     // ---- run the active mode -> a movement goal + pose ----
-    let goalX, goalZ, smooth = false, fast = false;
+    let goalX, goalZ, smooth = false, fast = false, crawlRun = false;
     if (this.hunting) {
-      this.hang = 0; goalX = player.pos.x; goalZ = player.pos.z; fast = true;
+      this.hang = 0; goalX = player.pos.x; goalZ = player.pos.z; crawlRun = true;
     } else if (this.mode === 'peek' && this.tree) {
       this.hang = 0; this._animatePeek(dt); smooth = true;
       // body stays PINNED just behind the trunk (occluded); `peek` drives the head/arm
@@ -4189,7 +4220,20 @@ class Stalker {
       goalX = this.lurkGoal.x; goalZ = this.lurkGoal.z;
     }
 
-    // ---- movement: smooth glide for peek/canopy, eerie stutter for lurk/hunt ----
+    // ---- movement: smooth crawl-run on the kill, smooth glide for peek/canopy, eerie stutter for lurk ----
+    if (crawlRun) {
+      // CRAWL-RUN: a continuous, fast scramble straight at the player (NO teleport-stutter).
+      // Fast enough to threaten, slow enough to turn-and-flashlight if you're sharp.
+      const sdx = goalX - this.pos.x, sdz = goalZ - this.pos.z, sl = Math.hypot(sdx, sdz) || 1;
+      const spd = 6.0;                                     // blocks/sec — ~sprint pace, reactable from ~12 out
+      const stepd = Math.min(sl, spd * dt);
+      this.pos.x += sdx / sl * stepd; this.pos.z += sdz / sl * stepd;
+      this.crawl = Math.min(1, (this.crawl || 0) + dt * 3.5);          // ease into the crawl pose
+      this.gait += dt * 13 * (sl > 0.5 ? 1 : 0);                       // limb gait cycle while moving
+      if (this._scrambleT === undefined) this._scrambleT = 0;
+      this._scrambleT -= dt; if (this._scrambleT <= 0) { this._scrambleT = 0.5 + Math.random() * 0.5; audio && audio.whisper(); }
+    } else {
+      this.crawl = Math.max(0, (this.crawl || 0) - dt * 4);
     if (smooth) {
       const k = Math.min(1, dt * (this.mode === 'peek' ? 10 : 2.5));
       this.pos.x = lerp(this.pos.x, goalX, k); this.pos.z = lerp(this.pos.z, goalZ, k);
@@ -4208,6 +4252,7 @@ class Stalker {
         this.burstT = this.stepDur + (fast ? 0.12 + Math.random() * 0.25 : 0.4 + Math.random() * 0.8);
         if (Math.random() < 0.35) audio && audio.whisper();
       }
+    }
     }
     // vertical placement: drape over the canopy top / sink the peek below the leaves / else stand
     if (this.mode === 'canopy' && this.tree) this.pos.y = (this.tree.leafBottom || this.tree.h + 5);
@@ -4251,6 +4296,7 @@ class Stalker {
   // misshapen splitting head. The canopy "drape" uses a dedicated posed mesh.
   buildMesh() {
     if (this.drape > 0) return this._canopyMesh();            // clinging over the canopy edge (hand-posed, not warped)
+    if (this.crawl > 0.15) return this._crawlMesh();          // crawl-running at the player on the kill
     const v = [], i = [];
     const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z;
     const split = this.split, mouth = this.mouth, tw = this.twitch, t = this.t, hj = this.headJ;
@@ -4343,6 +4389,7 @@ class Stalker {
   // ring of glowing fangs around a hot throat. Flipped with the body when hanging.
   buildEyes() {
     if (this.drape > 0) return this._canopyEyes();       // glowing eyes + maw on the draped head
+    if (this.crawl > 0.15) return this._crawlEyes();     // glowing eyes + maw on the low crawl-running head
     const v = [], i = [];
     const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z;
     const mouth = this.mouth, hj = this.headJ, tile = Blocks._tileNames['eye_glow'], eyeTile = Blocks._tileNames['eye'];
@@ -4452,6 +4499,66 @@ class Stalker {
       }
     }
     eglow(mcx, mcy, mcz, 0.12 + bloom * 0.12, 0.12 + bloom * 0.12, 0.06, 2.0 + bloom * 1.2);  // hot throat ember
+    return { verts: new Float32Array(v), idx: new Uint32Array(i) };
+  }
+
+  // ---- CRAWL-RUN pose (hand-built): on all fours, body low + horizontal, the head
+  // leading LOW at the front (local -Z = straight at the player), long front arms
+  // reaching/planting ahead and hind legs shoving off behind in an opposing gallop
+  // gait (this.gait), with a body bob. Drawn only while charging on the kill. ----
+  _crawlMesh() {
+    const v = [], i = [];
+    const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z, g = this.gait;
+    const LIMB = [0.5, 0, 1, 0.5], TORSO = [0, 0, 0.5, 0.5], HEAD = [0, 0.5, 0.5, 1];
+    const cbox = (cx, cy, cz, w, h, d, uv, b) => boxRot(v, i, ox, oy, oz, cos, sin, cx - w / 2, cy - h / 2, cz - d / 2, w, h, d, uv[0], uv[1], uv[2], uv[3], b === undefined ? 1 : b, 0, 0, null);
+    const bob = Math.sin(g * 2) * 0.10, hb = Math.sin(g * 2 + 1) * 0.05;
+    // horizontal body: hips at the back (+z), shoulders forward (-z), spine low + level
+    cbox(0, 1.25 + bob, 0.85, 0.50, 0.50, 0.55, TORSO);   // hips
+    cbox(0, 1.30 + bob, 0.40, 0.50, 0.56, 0.55, TORSO);   // lower torso
+    cbox(0, 1.28 + bob, -0.08, 0.55, 0.60, 0.55, TORSO);  // chest
+    cbox(0, 1.22 + bob, -0.50, 0.60, 0.50, 0.42, TORSO);  // shoulders
+    cbox(0, 1.60 + bob, 0.30, 0.12, 0.14, 1.25, TORSO);   // jagged spine ridge down the back
+    // neck + the head leading LOW at the front, facing the player (-z)
+    cbox(0, 1.02 + bob + hb, -0.80, 0.22, 0.34, 0.42, TORSO);  // neck
+    cbox(0, 0.84 + bob + hb, -1.08, 0.46, 0.52, 0.42, HEAD);   // skull
+    cbox(0, 1.12 + bob + hb, -1.02, 0.30, 0.22, 0.30, HEAD);   // crown lump
+    cbox(0, 0.80 + bob + hb, -1.30, 0.30, 0.30, 0.20, HEAD, 0.45);  // dark gullet backing the glowing maw
+    // FRONT arms — long, reaching + planting ahead in a gallop
+    for (const s of [-1, 1]) {
+      const fr = Math.sin(g + (s < 0 ? 0 : Math.PI)), lift = Math.max(0, -fr) * 0.34, reachZ = -1.05 - 0.42 * Math.max(0, fr);
+      const ax = s * 0.34;
+      cbox(ax, 1.02 + bob, -0.66, 0.16, 0.55, 0.34, LIMB);          // upper arm angling fwd-down
+      cbox(ax, 0.50 + lift, reachZ, 0.15, 0.55, 0.50, LIMB);        // forearm reaching ahead
+      cbox(ax, 0.12 + lift, reachZ - 0.22, 0.20, 0.18, 0.34, LIMB); // planted clawed hand
+    }
+    // HIND legs — shoving off behind, opposite phase
+    for (const s of [-1, 1]) {
+      const bk = Math.sin(g + (s < 0 ? Math.PI : 0)), lift = Math.max(0, -bk) * 0.30, pushZ = 1.05 + 0.40 * Math.max(0, bk);
+      const lx = s * 0.27;
+      cbox(lx, 1.00 + bob, 1.05, 0.20, 0.50, 0.40, LIMB);          // thigh
+      cbox(lx, 0.50 + lift, pushZ, 0.18, 0.55, 0.45, LIMB);        // shin
+      cbox(lx, 0.12 + lift, pushZ + 0.16, 0.18, 0.16, 0.32, LIMB); // foot
+    }
+    return { verts: new Float32Array(v), idx: new Uint32Array(i) };
+  }
+  _crawlEyes() {
+    const v = [], i = [];
+    const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z, g = this.gait;
+    const glowTile = Blocks._tileNames['eye_glow'], eyeTile = Blocks._tileNames['eye'], mawTile = Blocks._tileNames['maw'];
+    const bob = Math.sin(g * 2) * 0.10, hb = Math.sin(g * 2 + 1) * 0.05;
+    const hY = 0.84 + bob + hb, hZ = -1.30, bloom = this.mouth, rest = Math.max(0, 1 - bloom * 2);
+    const eglow = (lx, ly, lz, w, h, d, br, tl) => boxRotTile(v, i, ox, oy, oz, cos, sin, lx - w / 2, ly - h / 2, lz - d / 2, w, h, d, tl === undefined ? glowTile : tl, br, 2, 0, null);
+    const eyeY = hY + 0.26, eyeZ = hZ - 0.02, eyeBr = 1.25 + rest * 0.4;
+    eglow(-0.13, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);
+    eglow(0.13, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);
+    eglow(-0.13, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    eglow(0.13, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    const mcy = hY - 0.04, mcz = hZ - 0.05, mawReach = 0.11 + bloom * 0.42, NSEG = 8;
+    for (let p = 0; p < 5; p++) {
+      const ang = -1.5708 + p * 1.25664, rx = Math.cos(ang), ry = Math.sin(ang);
+      for (let j = 0; j <= NSEG; j++) { const q = j / NSEG, radial = mawReach * q, w = 0.22 - 0.15 * q; eglow(rx * radial, mcy + ry * radial, mcz - 0.02 * q, w, w, 0.08, 1.1, mawTile); }
+    }
+    eglow(0, mcy, mcz, 0.12 + bloom * 0.12, 0.12 + bloom * 0.12, 0.06, 2.0 + bloom * 1.2);
     return { verts: new Float32Array(v), idx: new Uint32Array(i) };
   }
 }
@@ -5189,7 +5296,7 @@ class Game {
     // a bed is two side-by-side blocks - breaking one removes its partner
     if (id === B.BED) this._removeBedPair(t.x, t.y, t.z);
     // felling the trunk orphans the canopy: nearby leaves begin to wither
-    if (id === B.WOOD) this._decayLeaves(t.x, t.y, t.z);
+    if (id === B.WOOD) { this._decayLeaves(t.x, t.y, t.z); this._dropHanged(t.x, t.y, t.z); }
     // what the block drops
     let drop = id;
     if (id === B.GRASS) drop = B.DIRT;
@@ -5478,6 +5585,7 @@ class Game {
     this._updateParticles(dt);
     this._updateMotes(dt);
     this._updateLeafDecay(dt);
+    this._updateHanged(dt);
     this._updateSleep(dt);
     this._stream();
     this._updateStalker(dt, daylight);
@@ -5493,9 +5601,9 @@ class Game {
       // audible whenever the watcher is present within ~32 blocks (a clear floor so you
       // hear your heart the moment it's around), pounding harder as it closes in
       if (d < 32) heartLv = (0.5 + 0.5 * clamp(1 - d / 24, 0, 1)) * (sk.hunting ? 1 : 0.92);
-      // mimicked voices come from a DISTANCE: peak ~14-30 blocks, silent when it's
-      // right on top of you (<8) or far gone (>~45) - only at night
-      if (night) horrorLv = clamp((d - 8) / 8, 0, 1) * clamp(1 - (d - 30) / 16, 0, 1);
+      // the mimicked screams come from where it lurks and SWELL LOUDER as you close the
+      // distance toward it (audible from ~44 blocks, near-deafening right on top) - night only
+      if (night) horrorLv = clamp(1 - d / 44, 0, 1);
     }
     this.audio.setHeartbeat(heartLv);
     this.audio.setHorror(horrorLv);
@@ -5889,8 +5997,8 @@ class Game {
       if (sx * sx + sz * sz < (R * 16) * (R * 16)) {
         const m = this.stalker.buildMesh();
         r.drawDynamicTex(m.verts, m.idx, this.stalker.skinName());
-        const e = this.stalker.buildEyes();             // glowing eyes + grin (block atlas)
-        r.drawDynamicNoCull(e.verts, e.idx);            // double-sided (may hang upside-down)
+        const e = this.stalker.buildEyes();             // glowing eyes + maw (block atlas)
+        r.drawDynamicGlow(e.verts, e.idx);              // alpha-cutout: only the glow shows, no box rectangle
       }
     }
 
@@ -5941,29 +6049,50 @@ class Game {
     if (idx.length) r.drawDynamicDecal(new Float32Array(v), new Uint32Array(idx));
   }
 
-  // draw the rare hanged figures: a slowly-twisting body on a rope from a branch
+  // draw the rare hanged figures: hanging by a noose / mid-fall after the trunk is cut /
+  // crumpled in a pool of blood on the ground
   _drawHanged(r, R) {
     if (!this.world.hanged.length) return;
     const lim = R * CHUNK_SX, px = this.player.pos.x, pz = this.player.pos.z, t = this._clock;
+    const HEAD = [0, 0.5, 0.5, 1], TORSO = [0, 0, 0.5, 0.5], LIMB = [0.5, 0, 1, 0.5];
     for (const hb of this.world.hanged) {
       if (Math.abs(hb.x - px) > lim || Math.abs(hb.z - pz) > lim) continue;
-      const ang = Math.sin(t * 0.5 + hb.seed * 6.28) * 0.13;       // slow twist on the rope
-      const cos = Math.cos(ang), sin = Math.sin(ang), ox = hb.x, oz = hb.z;
-      // hang the body well BELOW the leaf canopy (leaves reach down to branchY-1) so the
-      // head is in open air, not buried in the tree; clamp the feet just above the ground.
-      const ground = (hb.ground !== undefined ? hb.ground : hb.branchY - 5);
-      const oy = Math.max(ground + 0.2, hb.branchY - 4.35);        // feet; figure ~2.0 tall
-      const headTop = oy + 2.0;                                    // neck/head top
-      const HEAD = [0, 0.5, 0.5, 1], TORSO = [0, 0, 0.5, 0.5], LIMB = [0.5, 0, 1, 0.5];
+      const ox = hb.x, oz = hb.z, gy = this.world.heightAt(Math.floor(ox), Math.floor(oz));
+
+      if (hb.landed) {                                              // a crumpled corpse in a bloody splatter
+        const splat = Blocks._tileNames['blood'], dv = [], didx = [];
+        appendDecal(dv, didx, ox, gy + 1.02, oz, 2.5, 2.5, hb.seed * 6.28, splat, 1.0);            // pool
+        appendDecal(dv, didx, ox + 0.7, gy + 1.02, oz - 0.5, 1.4, 1.4, hb.seed * 3.1, splat, 0.95);  // spray
+        appendDecal(dv, didx, ox - 0.6, gy + 1.02, oz + 0.4, 1.1, 1.1, hb.seed * 1.7, splat, 0.9);
+        if (didx.length) r.drawDynamicDecal(new Float32Array(dv), new Uint32Array(didx));
+        const cs = Math.cos(hb.fallRot || 0), sn = Math.sin(hb.fallRot || 0), v = [], idx = [];
+        const box = (lx, ly, lz, sx, sy, sz, uv) => boxRot(v, idx, ox, gy + 1.0, oz, cs, sn, lx, ly, lz, sx, sy, sz, uv[0], uv[1], uv[2], uv[3], 0.62, 0, 0);
+        box(-0.35, 0.0, -0.22, 0.70, 0.22, 0.52, TORSO);           // flattened torso
+        box(-0.16, 0.02, 0.36, 0.34, 0.22, 0.40, HEAD);            // head lolled out to the side
+        box(-0.74, 0.0, -0.12, 0.42, 0.16, 0.16, LIMB);            // arms splayed
+        box(0.34, 0.0, 0.06, 0.42, 0.16, 0.16, LIMB);
+        box(-0.22, 0.0, -0.64, 0.16, 0.16, 0.46, LIMB);            // legs splayed
+        box(0.08, 0.0, -0.62, 0.16, 0.16, 0.46, LIMB);
+        r.drawDynamicTex(new Float32Array(v), new Uint32Array(idx), 'humanoid');
+        continue;
+      }
+
+      const falling = !!hb.falling;
+      const ang = falling ? (hb.fallRot || 0) : Math.sin(t * 0.5 + hb.seed * 6.28) * 0.13;   // tumble in the fall, else slow rope-twist
+      const cos = Math.cos(ang), sin = Math.sin(ang);
+      const oy = falling ? hb.fallY : Math.max(gy + 1.1, hb.branchY - 4.35);                 // feet rest at/above the surface; figure ~2.0 tall
+      const headTop = oy + 2.0;
       const v = [], idx = [];
       const box = (lx, ly, lz, sx, sy, sz, uv) => boxRot(v, idx, ox, oy, oz, cos, sin, lx, ly, lz, sx, sy, sz, uv[0], uv[1], uv[2], uv[3], 0.75, 0, 0);
       box(-0.13, 0.0, -0.1, 0.11, 0.9, 0.13, LIMB);                // dangling legs (together)
       box(0.02, 0.0, -0.1, 0.11, 0.9, 0.13, LIMB);
       box(-0.18, 0.85, -0.12, 0.36, 0.72, 0.22, TORSO);            // slumped torso
-      box(-0.33, 0.95, -0.1, 0.15, 0.7, 0.13, LIMB);               // limp arms at the sides
-      box(0.18, 0.95, -0.1, 0.15, 0.7, 0.13, LIMB);
+      box(falling ? -0.52 : -0.33, 0.95, -0.1, 0.15, 0.7, 0.13, LIMB);  // arms flail out as it drops
+      box(falling ? 0.37 : 0.18, 0.95, -0.1, 0.15, 0.7, 0.13, LIMB);
       box(-0.16, 1.58, -0.15, 0.32, 0.34, 0.3, HEAD);              // lolling head
       r.drawDynamicTex(new Float32Array(v), new Uint32Array(idx), 'humanoid');
+      if (falling) continue;                                       // rope is cut -> no rope/branch while it drops
+
       // a stubby branch out from the trunk + the noose: a long rope from a knot at the
       // neck up to the branch end, so it reads clearly as "hanged by the neck from a branch".
       const wood = Blocks._tileNames['wood_side'];
@@ -5974,6 +6103,34 @@ class Game {
       appendCube(rv, ridx, ox - 0.03, headTop - 0.05, oz - 0.03, 0.06, (hb.branchY + 0.18) - (headTop - 0.05), 0.06, wood, 0.55, 0); // rope
       appendCube(rv, ridx, ox - 0.08, headTop - 0.12, oz - 0.08, 0.16, 0.16, 0.16, wood, 0.5, 0);                                 // noose knot at the neck
       r.drawDynamic(new Float32Array(rv), new Uint32Array(ridx));
+    }
+  }
+  // when the trunk a hanged figure dangles from is felled, cut it loose to ragdoll down
+  _dropHanged(x, y, z) {
+    if (!this.world.hanged) return;
+    for (const hb of this.world.hanged) {
+      if (hb.falling || hb.landed) continue;
+      const tx = Math.floor(hb.x), tz = Math.floor(hb.z - (hb.off || 0));   // the trunk column it hangs beside
+      if (x === tx && z === tz && y >= (hb.ground || 0) && y <= hb.branchY + 1) {
+        hb.falling = true; hb.fallVel = 0; hb.fallSpin = (Math.random() * 2 - 1) * 3.2;
+        hb.fallY = Math.max((hb.ground || y) + 1.1, hb.branchY - 4.35);
+      }
+    }
+  }
+  // advance a cut-loose body: gravity + tumble, then SPLAT into a bloody heap on the ground
+  _updateHanged(dt) {
+    const hs = this.world.hanged; if (!hs || !hs.length) return;
+    for (const hb of hs) {
+      if (!hb.falling || hb.landed) continue;
+      hb.fallVel = (hb.fallVel || 0) + 24 * dt;                    // gravity
+      hb.fallY -= hb.fallVel * dt;
+      hb.fallRot = (hb.fallRot || 0) + (hb.fallSpin || 2.5) * dt;
+      const gy = this.world.heightAt(Math.floor(hb.x), Math.floor(hb.z));
+      if (hb.fallY <= gy + 1.0) {                                  // impact (the surface) -> blood + a wet thud
+        hb.fallY = gy + 1.0; hb.landed = true;
+        this._spawnParticles(hb.x, gy + 0.6, hb.z, B.REDSTONE);    // a gore puff
+        this.audio.play('break');
+      }
     }
   }
 
