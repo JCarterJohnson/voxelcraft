@@ -4172,11 +4172,11 @@ class Stalker {
     // it up to drive it off). It never lunges from directly behind, unseen.
     this.huntT -= dt;
     if (!this.hunting && this.huntT <= 0 && this.approach >= 0.8) {   // only commits once it has crept close
-      this.hunting = true; this.huntWin = 5 + Math.random() * 4; this.mode = 'lurk'; this.tree = null; this.hang = 0; this.drape = 0;
-      // reposition into the player's forward arc (~+-40deg), out at ~12 blocks
-      const a = (Math.random() - 0.5) * 1.4;
-      this.pos.set(player.pos.x + Math.sin(player.yaw + a) * 12, this.pos.y, player.pos.z - Math.cos(player.yaw + a) * 12);
-      this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1;
+      this.hunting = true; this.huntWin = 6 + Math.random() * 4; this.mode = 'lurk'; this.tree = null; this.hang = 0; this.drape = 0;
+      // it charges FROM WHERE IT LURKS straight at you (no teleport). Only if it's parked
+      // very far do we close the gap to ~14 blocks so the run isn't endless.
+      const cdx = this.pos.x - player.pos.x, cdz = this.pos.z - player.pos.z, cl = Math.hypot(cdx, cdz) || 1;
+      if (cl > 14) { this.pos.x = player.pos.x + cdx / cl * 14; this.pos.z = player.pos.z + cdz / cl * 14; this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1; }
       this.stepProg = 1; this.split = 0.4; this.aggro = 1;
       if (audio) audio.whisper();                     // a low cue that something just shifted
     }
@@ -4225,11 +4225,12 @@ class Stalker {
       // CRAWL-RUN: a continuous, fast scramble straight at the player (NO teleport-stutter).
       // Fast enough to threaten, slow enough to turn-and-flashlight if you're sharp.
       const sdx = goalX - this.pos.x, sdz = goalZ - this.pos.z, sl = Math.hypot(sdx, sdz) || 1;
-      const spd = 6.0;                                     // blocks/sec — ~sprint pace, reactable from ~12 out
-      const stepd = Math.min(sl, spd * dt);
+      const spd = 5.4;                                     // blocks/sec — below the player's sprint (6.24) so careful sprinting pulls away
+      const standoff = 1.25;                               // stop at point-blank; it LOOMS at contact, never runs INTO you
+      const stepd = Math.min(Math.max(0, sl - standoff), spd * dt);
       this.pos.x += sdx / sl * stepd; this.pos.z += sdz / sl * stepd;
       this.crawl = Math.min(1, (this.crawl || 0) + dt * 3.5);          // ease into the crawl pose
-      this.gait += dt * 13 * (sl > 0.5 ? 1 : 0);                       // limb gait cycle while moving
+      this.gait += dt * 13 * (stepd > 0.001 ? 1 : 0);                  // limb gait cycle only while actually advancing
       if (this._scrambleT === undefined) this._scrambleT = 0;
       this._scrambleT -= dt; if (this._scrambleT <= 0) { this._scrambleT = 0.5 + Math.random() * 0.5; audio && audio.whisper(); }
     } else {
