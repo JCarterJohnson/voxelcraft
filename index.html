@@ -704,6 +704,15 @@ const Blocks = {
         c.fillStyle = '#cfd6e0'; c.beginPath(); c.arc(8, 8, 2.0, 0, Math.PI * 2); c.fill();
       }
     });
+    // ---- wet red maw flesh (the gaping mouth's fleshy flaps): mottled red + pale fangs ----
+    tile('maw', c => {
+      noisy(c, [158, 30, 34], 12, 471);                          // wet red flesh base
+      c.fillStyle = 'rgba(84,10,14,0.55)';                       // dark recesses/mottling
+      for (let k = 0; k < 6; k++) c.fillRect((this.hash(k, 1, 471) * 14) | 0, (this.hash(k, 2, 471) * 14) | 0, 2, 3);
+      c.fillStyle = 'rgba(234,228,212,0.95)';                    // pale fang rows top + bottom
+      for (let k = 0; k < 5; k++) { c.fillRect(2 + k * 2.7, 1.5, 1.5, 3.2); c.fillRect(2.8 + k * 2.7, 11.4, 1.4, 3); }
+      c.fillStyle = 'rgba(226,96,96,0.5)'; c.fillRect(5, 6, 6, 4);// wet highlight
+    });
     // ---- cursed plushie block (from "The Obsessed" texture pack) -----
     tile('cursed_plushie', c => {
       if (window.PACK_IMG && PACK_IMG.cursedplushie) { c.imageSmoothingEnabled = true; c.drawImage(PACK_IMG.cursedplushie, 0, 0, T, T); c.imageSmoothingEnabled = false; }
@@ -4285,26 +4294,11 @@ class Stalker {
     box(-0.08 + hj, 4.0, -0.12, 0.16, 0.45, 0.16, TORSO);                 // neck
     box(-0.2 + hj, 4.42, -0.16, 0.4, 0.56, 0.32, HEAD);                   // skull (solid from behind; backs the eyes)
     box(-0.12 + hj, 4.9, -0.12, 0.3, 0.24, 0.24, HEAD);                   // off-centre crown lump
-    // The face does NOT split like a fork. It is a radial/cruciform maw:
-    // five fleshy flaps around a central throat that bloom open like a
-    // predatory flower. mouth = bloom (0 = a closed pointed bud, 1 = flayed
-    // wide). Each flap is a chain of tapering boxes, so it reads as one solid
-    // petal rather than loose cubes, and splays outward as it opens.
+    // The face's gaping maw (the red fleshy flaps) is drawn in buildEyes' emissive pass
+    // with the dedicated 'maw' tile so it reads as one solid glowing mouth. Here we only
+    // place a dark recessed gullet box behind it as solid backing (so nothing shows through).
     const bloom = mouth, mcx = hj, mcy = 4.46, mcz = -0.22;               // maw sits low on the face, below the eyes
-    for (let p = 0; p < 5; p++) {
-      const ang = -1.5708 + p * 1.25664 + hj * 0.4;                       // 5 flaps, one points up
-      const rx = Math.cos(ang), ry = Math.sin(ang);
-      for (let j = 1; j <= 4; j++) {
-        const q = j / 4;                                                  // 0..1 base -> tip
-        const radial = (0.05 + bloom * 0.38) * q;                         // splays outward as it opens
-        const fwd = 0.34 * (1 - bloom * 0.8) * q;                         // forward bud collapses open
-        const px = mcx + rx * radial, py = mcy + ry * radial;
-        const pz = mcz - fwd + bloom * 0.18 * q * q;                      // tips peel back when bloomed
-        const w = 0.14 * (1 - 0.62 * q), d = Math.max(0.06, 0.13 * (1 - 0.4 * q));
-        box(px - w / 2, py - w / 2, pz - d / 2, w, w, d, JAW, 1.15);      // tapering flesh flap segment
-      }
-    }
-    box(mcx - 0.1, mcy - 0.1, mcz - 0.02, 0.2, 0.2, 0.14 + bloom * 0.24, JAW, 0.15);  // dark throat
+    box(mcx - 0.15, mcy - 0.15, mcz + 0.02, 0.30, 0.30, 0.18 + bloom * 0.22, HEAD, 0.45);  // dark gullet backing
     return { verts: new Float32Array(v), idx: new Uint32Array(i) };
   }
 
@@ -4332,26 +4326,21 @@ class Stalker {
     const eyeY = 4.74, eyeBr = 1.25 + rest * 0.4;        // a touch brighter at rest (the lurking stare)
     glow(mcx - 0.16, eyeY, -0.205, 0.26, 0.20, 0.07, eyeBr, eyeTile);   // wider than tall, like a real eye
     glow(mcx + 0.16, eyeY, -0.205, 0.26, 0.20, 0.07, eyeBr, eyeTile);
-    // hot throat core - a steady ember (smaller now that the eyes carry the face)
-    glow(mcx, mcy, -0.22 + bloom * 0.05, 0.11 + bloom * 0.12 + rest * 0.12, 0.11 + bloom * 0.12 + rest * 0.12, 0.07, 1.7 + bloom * 1.4 + rest * 1.0);
+    // the gaping maw: SOLID red fleshy flaps. Each of the 5 flaps is a DENSE chain of
+    // overlapping tapering boxes (boxes far wider than the radial step) sharing an
+    // overlapping base rim, so it reads as ONE cohesive red mouth - not loose cubes.
+    // Drawn in this emissive pass with the 'maw' tile so the flesh glows red.
+    const mawTile = Blocks._tileNames['maw'];
+    const mawReach = 0.11 + bloom * 0.42, NSEG = 8;
     for (let p = 0; p < 5; p++) {
-      const ang = -1.5708 + p * 1.25664 + hj * 0.4;
-      const rx = Math.cos(ang), ry = Math.sin(ang);
-      // closed bud: a BRIGHT cruciform seam (a glowing chain per flap) so the resting
-      // maw reads as a glowing face from a real distance through the night fog
-      if (rest > 0) {
-        for (let s = 1; s <= 2; s++) {
-          const r = 0.05 + s * 0.07, sz = 0.05;
-          glow(mcx + rx * r, mcy + ry * r, -0.30, sz, sz, 0.08, (1.0 + rest * 0.6) * (1 - s * 0.2));
-        }
-      }
-      // bloomed: a CONNECTED row of glints stepping out along each flap -> the open
-      // maw's ring of glowing fangs radiating from the throat
-      for (let s = 1; s <= 3; s++) {
-        const r = bloom * (0.08 + s * 0.11), sz = 0.055 - s * 0.008;
-        glow(mcx + rx * r, mcy + ry * r, -0.27 + bloom * 0.07, sz, sz, sz, 2.4 - s * 0.15);
+      const ang = -1.5708 + p * 1.25664 + hj * 0.4, rx = Math.cos(ang), ry = Math.sin(ang);
+      for (let j = 0; j <= NSEG; j++) {
+        const q = j / NSEG, radial = mawReach * q, peel = bloom * 0.14 * q * q, w = 0.24 - 0.17 * q;
+        glow(mcx + rx * radial, mcy + ry * radial, -0.24 - peel, w, w, 0.09, 1.15, mawTile);
       }
     }
+    // a hot ember deep in the throat centre (the inner mouth light), hotter when gaping
+    glow(mcx, mcy, -0.25, 0.13 + bloom * 0.12, 0.13 + bloom * 0.12, 0.06, 2.0 + bloom * 1.2);
     return { verts: new Float32Array(v), idx: new Uint32Array(i) };
   }
 }
