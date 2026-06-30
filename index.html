@@ -1870,7 +1870,7 @@ class World {
       if (!this.hangedKeys.has(k)) {
         this.hangedKeys.add(k);
         const off = this.hash2(bx, bz, 42) < 0.5 ? 1 : -1;
-        this.hanged.push({ x: bx + 0.5, z: bz + off + 0.5, branchY: by + th - 1, seed: this.hash2(bx, bz, 43), key: k });
+        this.hanged.push({ x: bx + 0.5, z: bz + off + 0.5, branchY: by + th - 1, off, ground: by - 1, seed: this.hash2(bx, bz, 43), key: k });
       }
     }
   }
@@ -3848,27 +3848,6 @@ class DroppedItem {
 // `lean` (optional {pivY, c, s, fwd}) smoothly tilts everything ABOVE pivY as one
 // rigid unit - a real per-vertex rotation about the waist (NOT a per-box shear), so
 // the body cranes/leans with flow instead of staircasing. fwd cranes it forward (-Z).
-// CANOPY DRAPE: map an upright body (local y 0=feet .. ~5=head) into a creature pouring
-// over the canopy rim — the ankles (below the pivot) hook BACK + UP onto the leaves to
-// grip, while everything above pours straight DOWN the outside face and leans OUT toward
-// the viewer, head dangling lowest. pos.y is the canopy top, so the head ends below the
-// leaves in open air. `dr` ramps 0->1 (the curl-over); `t` drives a slow living sway.
-function drapeXf(lx, ly, lz, dr, t) {
-  const W = 0.9;                                   // pivot near the ankles (the grip point)
-  let xx = lx, yy = ly, zz = lz;
-  if (ly >= W) {                                   // body + arms + head: bow OUT over the rim, then pour down IN FRONT of the leaves
-    const u = ly - W;                              // 0 .. ~4 up to the crown
-    yy = -dr * (1.2 * u);                          // hang below the rim
-    zz = lz - dr * (0.45 + 0.40 * u) + Math.sin(t * 0.8 + u * 0.7) * 0.05 * dr * u;  // bow out toward the viewer (clears the canopy) + pendulum life
-    xx = lx + Math.sin(t * 0.6 + u) * 0.03 * dr * u;                                 // faint lateral sway
-    if (ly > 4.2) zz -= dr * 0.22;                 // the head curls outward so the face presents to the player
-  } else {                                         // ankles/feet: hook BACK over the rim, claws splayed on the canopy top
-    const g = W - ly;                              // 0 .. 0.9 down to the soles
-    yy = dr * (0.32 * g);                          // ride just above the rim (a low gripping crouch, not antennae)
-    zz = lz + dr * (1.15 * g);                     // curl well back, lying along the leaf-top
-  }
-  return [xx, yy, zz];
-}
 function boxRot(v, idx, ox, oy, oz, cos, sin, lx, ly, lz, sx, sy, sz, u0, v0, u1, v1, bright, anim, flipY, lean) {
   anim = anim || 0; const fy = flipY ? -1 : 1;
   for (let f = 0; f < 6; f++) {
@@ -4096,13 +4075,16 @@ class Stalker {
     this.modeT = 5 + Math.random() * 5;
     const tree = this._findTree(player);
     const r = Math.random();
-    if (tree && r < 0.42) {                          // ~42% drape over the canopy edge, head hanging down
+    // canopy drape needs real vertical room (tall trunk) so it hangs clear below the
+    // leaves; on short trees it'd reach the ground, so those roll into a peek instead.
+    const tallEnough = tree && (tree.leafBottom - tree.h) >= 4;
+    if (tallEnough && r < 0.42) {                     // ~42% drape over the canopy edge, head hanging down
       this.mode = 'canopy'; this.tree = tree; this.hang = 1; this.drape = 0; this.crawlA = (Math.random() - 0.5) * 1.2;
       // latch the player-facing side of the canopy; it pours over THAT rim so the
       // draped head/torso hang into open air toward the viewer (re-curls each appearance)
       let ax = tree.x - player.pos.x, az = tree.z - player.pos.z; const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;
       this.canopyDir = { x: ax, z: az };
-      this.pos.set(tree.x - ax * 2.1, (tree.leafBottom || tree.h + 5) + 4.0, tree.z - az * 2.1);
+      this.pos.set(tree.x - ax * 2.1, (tree.leafBottom || tree.h + 5), tree.z - az * 2.1);   // pos.y = the leaf underside
     } else if (tree && r < 0.84) {                   // ~42% hide BEHIND the trunk and peek out
       this.mode = 'peek'; this.tree = tree; this.hang = 0; this.drape = 0; this.peek = 0; this.peekPhase = 'hidden';
       this.peekT = 0.5 + Math.random() * 1.2; this.peekSide = Math.random() < 0.5 ? 1 : -1;
@@ -4137,7 +4119,7 @@ class Stalker {
 
     // ---- aim geometry: direction to its glowing head + clear line of sight ----
     const eye = player.eye(), fwd = player.forward();
-    const headY = this.hang ? this.pos.y - 4.0 : this.pos.y + 4.6;   // glowing face position (draped head hangs below)
+    const headY = this.hang ? this.pos.y - 1.2 : this.pos.y + 4.6;   // glowing face position (draped head hangs just below the leaves)
     const hx = this.pos.x - eye.x, hy = headY - eye.y, hz = this.pos.z - eye.z;
     const hl = Math.hypot(hx, hy, hz) + 1e-3;
     const dn = new Vec3(hx / hl, hy / hl, hz / hl);
@@ -4228,7 +4210,7 @@ class Stalker {
       }
     }
     // vertical placement: drape over the canopy top / sink the peek below the leaves / else stand
-    if (this.mode === 'canopy' && this.tree) this.pos.y = (this.tree.leafBottom || this.tree.h + 5) + 4.0;
+    if (this.mode === 'canopy' && this.tree) this.pos.y = (this.tree.leafBottom || this.tree.h + 5);
     else if (this.mode === 'peek' && this.tree) this.pos.y = this.peekY;
     else this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1;
 
@@ -4266,12 +4248,13 @@ class Stalker {
   // Build the body from SOLID, CONNECTED boxes (overlapping at the joints) so it
   // reads as one cohesive creature: ~5 tall, hunched, asymmetric, with bent
   // spindly legs, very long bent arms ending in claws, a long neck and a
-  // misshapen splitting head. Flipped vertically when hanging in the canopy.
+  // misshapen splitting head. The canopy "drape" uses a dedicated posed mesh.
   buildMesh() {
+    if (this.drape > 0) return this._canopyMesh();            // clinging over the canopy edge (hand-posed, not warped)
     const v = [], i = [];
     const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z;
     const split = this.split, mouth = this.mouth, tw = this.twitch, t = this.t, hj = this.headJ;
-    const dr = this.drape || 0, cr = dr > 0 ? 1 : 0;          // canopy drape (curl over the rim) + grip splay
+    const cr = 0;
     const LIMB = [0.5, 0, 1, 0.5], TORSO = [0, 0, 0.5, 0.5], HEAD = [0, 0.5, 0.5, 1], JAW = [0.5, 0.5, 1, 1];
     // `loom` bends the body forward+down, pivoting at the waist (y=2.3): everything
     // above shears toward the player so the head/maw juts down over a downed victim
@@ -4288,13 +4271,11 @@ class Stalker {
     const th = -ps * pk * 0.62;                                  // sideways tilt angle (rad)
     const peekLean = pk > 0 ? { pivY: 2.5, c: Math.cos(th), s: Math.sin(th), fwd: pk * 0.40 } : null;
     const box = (lx, ly, lz, sx, sy, sz, uv, b, an) => {
-      let xx = lx, yy = ly, zz = lz;
-      if (dr > 0) {                                             // CANOPY DRAPE (pos.y = canopy top; ankles grip, rest pours down the front)
-        const d = drapeXf(lx, ly, lz, dr, t); xx = d[0]; yy = d[1]; zz = d[2];
-      } else if (lo > 0 && ly > 2.3) {                          // downed loom (per-box shear, unchanged)
+      let yy = ly, zz = lz;
+      if (lo > 0 && ly > 2.3) {                                 // downed loom (per-box shear)
         const hh = ly - 2.3; yy = ly - lo * hh * 0.42; zz = lz - lo * hh * 0.62;
       }
-      return boxRot(v, i, ox, oy, oz, cos, sin, xx, yy, zz, sx, sy, sz, uv[0], uv[1], uv[2], uv[3], b === undefined ? 1 : b, an, 0, dr > 0 ? null : peekLean);
+      return boxRot(v, i, ox, oy, oz, cos, sin, lx, yy, zz, sx, sy, sz, uv[0], uv[1], uv[2], uv[3], b === undefined ? 1 : b, an, 0, peekLean);
     };
     // whole-limb sway/twitch (each limb's boxes share the offset, so they stay joined)
     const sway = (f, ph) => Math.sin(t * f + ph) * (0.02 + tw * 0.07);
@@ -4361,10 +4342,11 @@ class Stalker {
   // itself glows - a faint cruciform seam when the bud is closed, blooming into a
   // ring of glowing fangs around a hot throat. Flipped with the body when hanging.
   buildEyes() {
+    if (this.drape > 0) return this._canopyEyes();       // glowing eyes + maw on the draped head
     const v = [], i = [];
     const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z;
     const mouth = this.mouth, hj = this.headJ, tile = Blocks._tileNames['eye_glow'], eyeTile = Blocks._tileNames['eye'];
-    const bloom = mouth, mcx = hj, mcy = 4.46, lo = this.loom || 0, dr = this.drape || 0, t = this.t;
+    const bloom = mouth, mcx = hj, mcy = 4.46, lo = this.loom || 0, t = this.t;
     const rest = Math.max(0, 1 - bloom * 2);             // 1 = closed bud (lurking), 0 = mouth half+ open
     // an emissive tile-box, centred at (lx,ly,lz). Sheared by `loom` (downed) OR rotated
     // by the SAME peek lean as buildMesh's box() (pivot 2.5), so the eyes + maw stay
@@ -4373,10 +4355,9 @@ class Stalker {
     const ps = this.peekSide, th = -ps * pk * 0.62;
     const peekLean = pk > 0 ? { pivY: 2.5, c: Math.cos(th), s: Math.sin(th), fwd: pk * 0.40 } : null;
     const glow = (lx, ly, lz, w, h, d, br, tl) => {
-      let xx = lx, yy = ly, zz = lz;
-      if (dr > 0) { const g = drapeXf(lx, ly, lz, dr, t); xx = g[0]; yy = g[1]; zz = g[2]; }   // welded to the draped head
-      else if (lo > 0 && ly > 2.3) { const hh = ly - 2.3; yy = ly - lo * hh * 0.42; zz = lz - lo * hh * 0.62; }
-      return boxRotTile(v, i, ox, oy, oz, cos, sin, xx - w / 2, yy - h / 2, zz - d / 2, w, h, d, tl === undefined ? tile : tl, br, 2, 0, dr > 0 ? null : peekLean);
+      let yy = ly, zz = lz;
+      if (lo > 0 && ly > 2.3) { const hh = ly - 2.3; yy = ly - lo * hh * 0.42; zz = lz - lo * hh * 0.62; }
+      return boxRotTile(v, i, ox, oy, oz, cos, sin, lx - w / 2, yy - h / 2, zz - d / 2, w, h, d, tl === undefined ? tile : tl, br, 2, 0, peekLean);
     };
     // ---- two real eyes (the supplied eye PNG), emissive so they glow like eyeshine ----
     const eyeY = 4.74, eyeBr = 1.25 + rest * 0.4;        // a touch brighter at rest (the lurking stare)
@@ -4397,6 +4378,80 @@ class Stalker {
     }
     // a hot ember deep in the throat centre (the inner mouth light), hotter when gaping
     glow(mcx, mcy, -0.25, 0.13 + bloom * 0.12, 0.13 + bloom * 0.12, 0.06, 2.0 + bloom * 1.2);
+    return { verts: new Float32Array(v), idx: new Uint32Array(i) };
+  }
+
+  // ---- CANOPY DRAPE pose (hand-built, NOT a warp). pos sits at the player-facing
+  // canopy rim with pos.y = the leaf underside. The lower body + hind legs grip the
+  // leaf-top BEHIND the rim (+z, up in the foliage); the upper torso curls over the
+  // front lip and the long neck + head + long arms DROOP straight DOWN into open air
+  // toward the viewer. `drape` (0..1) animates head/arms from a perched crouch to a
+  // full hang — the "curling over the edge" motion. Head/neck/arm anchors here MUST
+  // match _canopyEyes so the glowing face stays welded. ----
+  _canopyAnchors() {
+    const dr = Math.max(0, Math.min(1, this.drape || 0));
+    const sw = Math.sin(this.t * 0.9) * 0.05 * dr;           // slow lateral life-sway of the hung head/arms
+    const headY = 0.4 - 2.0 * dr;                            // head min-corner Y: +0.4 (perched) -> -1.6 (hung below the leaves)
+    const headZ = -0.5 - 0.34 * dr;                          // comes out over the front lip toward the player
+    return { dr, sw, headY, headZ };
+  }
+  _canopyMesh() {
+    const v = [], i = [];
+    const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z, t = this.t;
+    const LIMB = [0.5, 0, 1, 0.5], TORSO = [0, 0, 0.5, 0.5], HEAD = [0, 0.5, 0.5, 1];
+    const { dr, sw, headY, headZ } = this._canopyAnchors();
+    const cbox = (lx, ly, lz, sx, sy, sz, uv, b) => boxRot(v, i, ox, oy, oz, cos, sin, lx, ly, lz, sx, sy, sz, uv[0], uv[1], uv[2], uv[3], b === undefined ? 1 : b, 0, 0, null);
+    // ---- lower body: pelvis + hind legs gripping the leaf-top BEHIND the rim (up in the canopy) ----
+    cbox(-0.26, 1.95, 0.22, 0.52, 0.44, 0.44, TORSO);                 // pelvis on the canopy
+    cbox(-0.24, 1.25, -0.04, 0.48, 0.82, 0.34, TORSO);                // lower back sloping down to the front lip
+    cbox(-0.05, 1.35, 0.40, 0.10, 0.95, 0.12, TORSO);                 // jagged spine ridge
+    for (const sg of [-1, 1]) {
+      const lx = sg < 0 ? -0.32 : 0.10, sp = Math.sin(t * 5 + sg) * 0.02;
+      cbox(lx, 2.05, 0.50 + sp, 0.22, 0.34, 0.74, LIMB);              // thigh reaching back onto the leaves
+      cbox(lx, 2.30, 1.12 + sp, 0.20, 0.24, 0.56, LIMB);             // shin further back
+      cbox(lx - 0.02, 1.85, 1.52, 0.26, 0.74, 0.16, LIMB);            // hooked hind claws dug into the leaf-top
+    }
+    // ---- upper torso curling OVER the front lip ----
+    cbox(-0.28, 0.50, -0.30, 0.56, 0.92, 0.34, TORSO);                // chest over the edge
+    cbox(-0.34, 0.30, -0.50, 0.68, 0.30, 0.32, TORSO);                // hunched shoulders at the lip
+    // ---- long neck + drooping head (hangs below the leaves, face toward the player) ----
+    const neckLo = headY + 0.50, neckHi = 0.55;
+    cbox(-0.09 + sw, neckLo, headZ + 0.06, 0.18, Math.max(0.2, neckHi - neckLo), 0.18, TORSO);   // long neck
+    cbox(-0.22 + sw, headY, headZ, 0.44, 0.56, 0.34, HEAD);           // skull
+    cbox(-0.12 + sw, headY + 0.47, headZ + 0.02, 0.30, 0.22, 0.22, HEAD);  // crown lump
+    cbox(-0.15 + sw, headY + 0.12, headZ - 0.18, 0.30, 0.30, 0.20, HEAD, 0.45);  // dark gullet backing the glowing maw
+    // ---- very long arms dangling straight DOWN past the head toward the viewer ----
+    for (const sg of [-1, 1]) {
+      const ax = sg < 0 ? -0.52 : 0.36, aw = Math.sin(t * 0.8 + sg * 2) * 0.04 * dr;
+      cbox(ax, 0.10 - 0.60 * dr, -0.50, 0.16, 0.95, 0.17, LIMB);                       // upper arm from the shoulder
+      cbox(ax + 0.02 + aw, -0.70 - 1.00 * dr, -0.58, 0.15, 1.10, 0.16, LIMB);          // forearm hanging down
+      for (let f = 0; f < 3; f++) cbox(ax + f * 0.06 + aw, -1.05 - 1.00 * dr + Math.sin(t * 4 + f) * 0.02 * dr, -0.60, 0.05, 0.42, 0.05, LIMB);  // long claws
+    }
+    return { verts: new Float32Array(v), idx: new Uint32Array(i) };
+  }
+  _canopyEyes() {
+    const v = [], i = [];
+    const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z;
+    const glowTile = Blocks._tileNames['eye_glow'], eyeTile = Blocks._tileNames['eye'], mawTile = Blocks._tileNames['maw'];
+    const { sw, headY, headZ } = this._canopyAnchors();
+    const bloom = this.mouth, rest = Math.max(0, 1 - bloom * 2);
+    const eglow = (lx, ly, lz, w, h, d, br, tl) => boxRotTile(v, i, ox, oy, oz, cos, sin, lx - w / 2, ly - h / 2, lz - d / 2, w, h, d, tl === undefined ? glowTile : tl, br, 2, 0, null);
+    // two eyes high on the drooping head's front (-z) face
+    const eyeY = headY + 0.36, eyeZ = headZ - 0.02, eyeBr = 1.25 + rest * 0.4;
+    eglow(-0.13 + sw, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);     // soft halo
+    eglow(0.11 + sw, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);
+    eglow(-0.13 + sw, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    eglow(0.11 + sw, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    // the red fleshy maw below the eyes — a cohesive ring of glowing flaps + hot throat
+    const mcx = sw, mcy = headY + 0.14, mcz = headZ - 0.04, mawReach = 0.11 + bloom * 0.42, NSEG = 8;
+    for (let p = 0; p < 5; p++) {
+      const ang = -1.5708 + p * 1.25664, rx = Math.cos(ang), ry = Math.sin(ang);
+      for (let j = 0; j <= NSEG; j++) {
+        const q = j / NSEG, radial = mawReach * q, w = 0.22 - 0.15 * q;
+        eglow(mcx + rx * radial, mcy + ry * radial, mcz - 0.02 * q, w, w, 0.08, 1.1, mawTile);
+      }
+    }
+    eglow(mcx, mcy, mcz, 0.12 + bloom * 0.12, 0.12 + bloom * 0.12, 0.06, 2.0 + bloom * 1.2);  // hot throat ember
     return { verts: new Float32Array(v), idx: new Uint32Array(i) };
   }
 }
@@ -5894,8 +5949,11 @@ class Game {
       if (Math.abs(hb.x - px) > lim || Math.abs(hb.z - pz) > lim) continue;
       const ang = Math.sin(t * 0.5 + hb.seed * 6.28) * 0.13;       // slow twist on the rope
       const cos = Math.cos(ang), sin = Math.sin(ang), ox = hb.x, oz = hb.z;
-      const headTop = hb.branchY - 0.2;                            // neck/head world height
-      const oy = headTop - 2.0;                                    // figure ~2.0 tall (feet to head)
+      // hang the body well BELOW the leaf canopy (leaves reach down to branchY-1) so the
+      // head is in open air, not buried in the tree; clamp the feet just above the ground.
+      const ground = (hb.ground !== undefined ? hb.ground : hb.branchY - 5);
+      const oy = Math.max(ground + 0.2, hb.branchY - 4.35);        // feet; figure ~2.0 tall
+      const headTop = oy + 2.0;                                    // neck/head top
       const HEAD = [0, 0.5, 0.5, 1], TORSO = [0, 0, 0.5, 0.5], LIMB = [0.5, 0, 1, 0.5];
       const v = [], idx = [];
       const box = (lx, ly, lz, sx, sy, sz, uv) => boxRot(v, idx, ox, oy, oz, cos, sin, lx, ly, lz, sx, sy, sz, uv[0], uv[1], uv[2], uv[3], 0.75, 0, 0);
@@ -5906,9 +5964,15 @@ class Game {
       box(0.18, 0.95, -0.1, 0.15, 0.7, 0.13, LIMB);
       box(-0.16, 1.58, -0.15, 0.32, 0.34, 0.3, HEAD);              // lolling head
       r.drawDynamicTex(new Float32Array(v), new Uint32Array(idx), 'humanoid');
-      // the rope: a thin dark line from the head up to the branch
+      // a stubby branch out from the trunk + the noose: a long rope from a knot at the
+      // neck up to the branch end, so it reads clearly as "hanged by the neck from a branch".
+      const wood = Blocks._tileNames['wood_side'];
+      const off = (hb.off !== undefined ? hb.off : 0), trunkZ = oz - off;     // trunk sits `off` blocks away in z
       const rv = [], ridx = [];
-      appendCube(rv, ridx, ox - 0.03, headTop + 0.15, oz - 0.03, 0.06, (hb.branchY + 1.2) - (headTop + 0.15), 0.06, Blocks._tileNames['wood_side'], 0.55, 0);
+      const zLo = Math.min(trunkZ, oz);
+      appendCube(rv, ridx, ox - 0.09, hb.branchY + 0.05, zLo - 0.08, 0.18, 0.18, Math.abs(oz - trunkZ) + 0.16, wood, 0.5, 0);  // branch
+      appendCube(rv, ridx, ox - 0.03, headTop - 0.05, oz - 0.03, 0.06, (hb.branchY + 0.18) - (headTop - 0.05), 0.06, wood, 0.55, 0); // rope
+      appendCube(rv, ridx, ox - 0.08, headTop - 0.12, oz - 0.08, 0.16, 0.16, 0.16, wood, 0.5, 0);                                 // noose knot at the neck
       r.drawDynamic(new Float32Array(rv), new Uint32Array(ridx));
     }
   }
