@@ -158,7 +158,7 @@
     <button id="btnContinue" class="btn">Continue</button>
     <button id="btnNew"      class="btn">New World</button>
     <button id="btnSettings" class="btn">Settings</button>
-    <div class="ver">build 9 &bull; 2026-06-30 &bull; canopy connected + off the ground</div>
+    <div class="ver">build 10 &bull; 2026-06-30 &bull; crawl-run animated + terrain-safe</div>
     <div class="hint">Click "New World" to begin &nbsp;&bull;&nbsp; click the screen to capture the mouse</div>
   </div>
 
@@ -4233,7 +4233,9 @@ class Stalker {
       const stepd = Math.min(Math.max(0, sl - standoff), spd * dt);
       this.pos.x += sdx / sl * stepd; this.pos.z += sdz / sl * stepd;
       this.crawl = Math.min(1, (this.crawl || 0) + dt * 3.5);          // ease into the crawl pose
-      this.gait += dt * 13 * (stepd > 0.001 ? 1 : 0);                  // limb gait cycle only while actually advancing
+      // gait ALWAYS cycles while it's in the crawl: it gallops while advancing and
+      // scrabbles frantically in place at the standoff, so it's NEVER a frozen slide.
+      this.gait += dt * (stepd > 0.001 ? 13 : 9);
       if (this._scrambleT === undefined) this._scrambleT = 0;
       this._scrambleT -= dt; if (this._scrambleT <= 0) { this._scrambleT = 0.5 + Math.random() * 0.5; audio && audio.whisper(); }
     } else {
@@ -4261,6 +4263,14 @@ class Stalker {
     // vertical placement: drape over the canopy top / sink the peek below the leaves / else stand
     if (this.mode === 'canopy' && this.tree) this.pos.y = (this.tree.leafBottom || this.tree.h + 5);
     else if (this.mode === 'peek' && this.tree) this.pos.y = this.peekY;
+    else if (this.hunting) {
+      // the crawler's body spans a few blocks; ride on top of the HIGHEST ground under its
+      // footprint so it never sinks into a slope as it scrambles over rough terrain.
+      const fx = Math.floor(this.pos.x), fz = Math.floor(this.pos.z);
+      let gmax = -999;
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) { const gy = this.world.heightAt(fx + dx, fz + dz); if (gy > gmax) gmax = gy; }
+      this.pos.y = gmax + 1;
+    }
     else this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1;
 
     // erratic body spasms + an unsettling head tilt/twitch
@@ -4510,54 +4520,58 @@ class Stalker {
   // leading LOW at the front (local -Z = straight at the player), long front arms
   // reaching/planting ahead and hind legs shoving off behind in an opposing gallop
   // gait (this.gait), with a body bob. Drawn only while charging on the kill. ----
+  // shared gait state so _crawlMesh + _crawlEyes bob/lunge identically (head stays welded)
+  _crawlGait() {
+    const g = this.gait;
+    const bob = Math.sin(g * 2) * 0.16, lunge = Math.cos(g * 2) * 0.12, hbb = Math.sin(g * 2 + 0.6) * 0.10;
+    const by = 1.35 + bob, hy = by - 0.5 + hbb, hz = -0.92 + lunge;
+    return { g, bob, lunge, hbb, by, hy, hz };
+  }
   _crawlMesh() {
     const v = [], i = [];
     const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z, g = this.gait;
     const LIMB = [0.5, 0, 1, 0.5], TORSO = [0, 0, 0.5, 0.5], HEAD = [0, 0.5, 0.5, 1];
     const cbox = (cx, cy, cz, w, h, d, uv, b) => boxRot(v, i, ox, oy, oz, cos, sin, cx - w / 2, cy - h / 2, cz - d / 2, w, h, d, uv[0], uv[1], uv[2], uv[3], b === undefined ? 1 : b, 0, 0, null);
-    const bob = Math.sin(g * 2) * 0.10, hb = Math.sin(g * 2 + 1) * 0.05;
-    // horizontal body: hips at the back (+z), shoulders forward (-z), spine low + level
-    cbox(0, 1.25 + bob, 0.85, 0.50, 0.50, 0.55, TORSO);   // hips
-    cbox(0, 1.30 + bob, 0.40, 0.50, 0.56, 0.55, TORSO);   // lower torso
-    cbox(0, 1.28 + bob, -0.08, 0.55, 0.60, 0.55, TORSO);  // chest
-    cbox(0, 1.22 + bob, -0.50, 0.60, 0.50, 0.42, TORSO);  // shoulders
-    cbox(0, 1.60 + bob, 0.30, 0.12, 0.14, 1.25, TORSO);   // jagged spine ridge down the back
-    // neck + the head leading LOW at the front, facing the player (-z)
-    cbox(0, 1.02 + bob + hb, -0.80, 0.22, 0.34, 0.42, TORSO);  // neck
-    cbox(0, 0.84 + bob + hb, -1.08, 0.46, 0.52, 0.42, HEAD);   // skull
-    cbox(0, 1.12 + bob + hb, -1.02, 0.30, 0.22, 0.30, HEAD);   // crown lump
-    cbox(0, 0.80 + bob + hb, -1.30, 0.30, 0.30, 0.20, HEAD, 0.45);  // dark gullet backing the glowing maw
-    // FRONT arms — long, reaching + planting ahead in a gallop
+    const { bob, lunge, by, hy, hz } = this._crawlGait();
+    // a vertical PISTON leg: a shaft from the body down to the foot + a foot box. The foot
+    // lifts high then PLANTS each stride, and the shaft tracks it -> a clearly animated step.
+    const leg = (ax, az, footY, thick) => {
+      const topY = by - 0.10;
+      cbox(ax, (topY + footY) / 2, az, thick, (topY - footY) + 0.22, thick, LIMB);   // shaft (stays joined as the foot moves)
+      cbox(ax, footY + 0.02, az - 0.06, thick + 0.07, 0.17, 0.36, LIMB);             // clawed foot/hand
+    };
+    // raised, compact body — SURGES up/down (bob) and pumps fore/aft (lunge) each stride
+    cbox(0, by, 0.60 + lunge, 0.52, 0.54, 0.50, TORSO);      // hips
+    cbox(0, by, 0.10 + lunge, 0.56, 0.58, 0.50, TORSO);      // torso
+    cbox(0, by - 0.05, -0.40 + lunge, 0.54, 0.54, 0.46, TORSO); // chest
+    cbox(0, by + 0.36, 0.30 + lunge, 0.12, 0.62, 0.12, TORSO);  // jagged spine ridge
+    // neck + the head leading LOW at the front, facing the player (-z), bobbing with each stride
+    cbox(0, by - 0.18, -0.64 + lunge, 0.24, 0.44, 0.40, TORSO); // neck
+    cbox(0, hy, hz, 0.48, 0.52, 0.44, HEAD);                    // skull
+    cbox(0, hy + 0.30, hz + 0.02, 0.30, 0.24, 0.30, HEAD);      // crown lump
+    cbox(0, hy - 0.06, hz - 0.24, 0.32, 0.32, 0.16, HEAD, 0.45);// dark gullet backing the glowing maw
+    // FOUR legs galloping: front pair + hind pair in opposite phase; feet lift ~0.55 then plant
     for (const s of [-1, 1]) {
-      const fr = Math.sin(g + (s < 0 ? 0 : Math.PI)), lift = Math.max(0, -fr) * 0.34, reachZ = -1.05 - 0.42 * Math.max(0, fr);
-      const ax = s * 0.34;
-      cbox(ax, 1.02 + bob, -0.66, 0.16, 0.55, 0.34, LIMB);          // upper arm angling fwd-down
-      cbox(ax, 0.50 + lift, reachZ, 0.15, 0.55, 0.50, LIMB);        // forearm reaching ahead
-      cbox(ax, 0.12 + lift, reachZ - 0.22, 0.20, 0.18, 0.34, LIMB); // planted clawed hand
-    }
-    // HIND legs — shoving off behind, opposite phase
-    for (const s of [-1, 1]) {
-      const bk = Math.sin(g + (s < 0 ? Math.PI : 0)), lift = Math.max(0, -bk) * 0.30, pushZ = 1.05 + 0.40 * Math.max(0, bk);
-      const lx = s * 0.27;
-      cbox(lx, 1.00 + bob, 1.05, 0.20, 0.50, 0.40, LIMB);          // thigh
-      cbox(lx, 0.50 + lift, pushZ, 0.18, 0.55, 0.45, LIMB);        // shin
-      cbox(lx, 0.12 + lift, pushZ + 0.16, 0.18, 0.16, 0.32, LIMB); // foot
+      const fsw = Math.sin(g + (s < 0 ? 0 : Math.PI)), flift = Math.max(0, -fsw) * 0.55;
+      leg(s * 0.34, -0.50 + lunge * 0.5 - 0.12 * Math.max(0, fsw), 0.05 + flift, 0.17);  // front (reaches forward on the pull)
+      const bsw = Math.sin(g + (s < 0 ? Math.PI : 0)), blift = Math.max(0, -bsw) * 0.55;
+      leg(s * 0.30, 0.62 + lunge * 0.5 + 0.12 * Math.max(0, bsw), 0.05 + blift, 0.19);   // hind (shoves back on the push)
     }
     return { verts: new Float32Array(v), idx: new Uint32Array(i) };
   }
   _crawlEyes() {
     const v = [], i = [];
-    const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z, g = this.gait;
+    const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z;
     const glowTile = Blocks._tileNames['eye_glow'], eyeTile = Blocks._tileNames['eye'], mawTile = Blocks._tileNames['maw'];
-    const bob = Math.sin(g * 2) * 0.10, hb = Math.sin(g * 2 + 1) * 0.05;
-    const hY = 0.84 + bob + hb, hZ = -1.30, bloom = this.mouth, rest = Math.max(0, 1 - bloom * 2);
+    const { hy, hz } = this._crawlGait();
+    const bloom = this.mouth, rest = Math.max(0, 1 - bloom * 2), fz = hz - 0.24;
     const eglow = (lx, ly, lz, w, h, d, br, tl) => boxRotTile(v, i, ox, oy, oz, cos, sin, lx - w / 2, ly - h / 2, lz - d / 2, w, h, d, tl === undefined ? glowTile : tl, br, 2, 0, null);
-    const eyeY = hY + 0.26, eyeZ = hZ - 0.02, eyeBr = 1.25 + rest * 0.4;
-    eglow(-0.13, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);
-    eglow(0.13, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);
-    eglow(-0.13, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
-    eglow(0.13, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
-    const mcy = hY - 0.04, mcz = hZ - 0.05, mawReach = 0.11 + bloom * 0.42, NSEG = 8;
+    const eyeY = hy + 0.15, eyeBr = 1.25 + rest * 0.4;
+    eglow(-0.13, eyeY, fz + 0.012, 0.22, 0.22, 0.04, 0.5);
+    eglow(0.13, eyeY, fz + 0.012, 0.22, 0.22, 0.04, 0.5);
+    eglow(-0.13, eyeY, fz, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    eglow(0.13, eyeY, fz, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    const mcy = hy - 0.12, mcz = fz - 0.02, mawReach = 0.11 + bloom * 0.42, NSEG = 8;
     for (let p = 0; p < 5; p++) {
       const ang = -1.5708 + p * 1.25664, rx = Math.cos(ang), ry = Math.sin(ang);
       for (let j = 0; j <= NSEG; j++) { const q = j / NSEG, radial = mawReach * q, w = 0.22 - 0.15 * q; eglow(rx * radial, mcy + ry * radial, mcz - 0.02 * q, w, w, 0.08, 1.1, mawTile); }
