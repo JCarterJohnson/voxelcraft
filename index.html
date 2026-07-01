@@ -158,7 +158,7 @@
     <button id="btnContinue" class="btn">Continue</button>
     <button id="btnNew"      class="btn">New World</button>
     <button id="btnSettings" class="btn">Settings</button>
-    <div class="ver">build 12 &bull; 2026-07-01 &bull; full backlog cleared: 97 audit fixes</div>
+    <div class="ver">build 13 &bull; 2026-07-01</div>
     <div class="hint">Click "New World" to begin &nbsp;&bull;&nbsp; click the screen to capture the mouse</div>
   </div>
 
@@ -1588,8 +1588,8 @@ class Chunk {
           if (id === B.AIR) continue;
           const def = Blocks.get(id);
           const wx = x0 + x, wy = y, wz = z0 + z;
-          const exposed = wy >= this.skyHeight(x, z);
-          const skyTint = exposed ? 1.0 : 0.62;    // caves are darker but still readable
+          const cover = this.skyHeight(x, z) - wy;   // opaque blocks of cover above this cell
+          const skyTint = cover <= 0 ? 1.0 : Math.max(0.62, 1.0 - cover * 0.08);  // walls stay bright; deep caves stay dark-but-readable
           const target = def.transparent ? tr : op;
           // a bed is not a cube: emit a proper low mattress + pillow mesh
           if (id === B.BED) { appendBed(target.v, target.i, world, wx, wy, wz, skyTint); continue; }
@@ -2260,7 +2260,7 @@ class Player {
     }
 
     // ---- exhaustion -> hunger -> health ----------------------------
-    if (len > 0) this.exhaustion += (sprinting ? 0.06 : 0.012) * dt * 60;
+    if (len > 0) this.exhaustion += (sprinting ? 0.03 : 0.006) * dt * 60;   // halved: the old rate demanded a meal every couple of minutes
     if (this.exhaustion >= 4) {
       this.exhaustion -= 4;
       if (this.saturation > 0) this.saturation = Math.max(0, this.saturation - 1);
@@ -3610,7 +3610,10 @@ class UIManager {
     ctx.lineWidth = 11; ctx.lineCap = 'round';
     ctx.strokeStyle = 'rgba(50,0,0,0.85)'; ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.stroke();
     const pulse = 0.6 + 0.4 * (Math.sin(q.t * 12) * 0.5 + 0.5);
-    ctx.strokeStyle = 'rgba(255,' + (40 + 30 * pulse | 0) + ',' + (40 + 30 * pulse | 0) + ',1)';
+    const urgent = q.time < 2.4;                       // the last stretch of the unseen 6s deadline
+    ctx.strokeStyle = urgent
+      ? (q.t % 0.24 < 0.12 ? '#ff2210' : '#7a0a00')    // hard red strobe: WAKE NOW
+      : 'rgba(255,' + (40 + 30 * pulse | 0) + ',' + (40 + 30 * pulse | 0) + ',1)';
     ctx.beginPath(); ctx.arc(cx, cy, rad, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(q.fill, 0, 1)); ctx.stroke();
     ctx.lineCap = 'butt';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -3783,7 +3786,7 @@ class UIManager {
   // a rotating cube textured with real block tiles (software-projected)
   _drawLogoCube(ctx, W, H, time) {
     ctx.clearRect(0, 0, W, H);
-    const ay = time * 0.7, ax = -0.5;
+    const ay = time * 0.7, ax = 0.5;               // tip TOWARD the viewer: you look down at the grass top
     const cosY = Math.cos(ay), sinY = Math.sin(ay), cosX = Math.cos(ax), sinX = Math.sin(ax);
     const verts = [];
     for (let i = 0; i < 8; i++) {
@@ -3794,14 +3797,16 @@ class UIManager {
       const persp = 3.2 / (z + 4.2), scale = 70;
       verts.push({ x: W / 2 + x * scale * persp, y: H / 2 + y * scale * persp, z });
     }
-    // cube faces -> [corner indices, tile name]
+    // cube faces -> [corner indices, tile name]. Vertex bit i&2 is +y, and screen-y
+    // grows DOWNWARD, so the y=-1 face is the one you see on TOP of the tilted cube:
+    // the classic grass block — grass top up, dirt underneath, grass sides all round.
     const faces = [
-      { idx: [0,1,3,2], tile: 'wood_side', z: 0 },   // -z
-      { idx: [4,5,7,6], tile: 'wood_side', z: 0 },   // +z
-      { idx: [0,1,5,4], tile: 'grass_side', z: 0 },  // -y? (sides)
-      { idx: [2,3,7,6], tile: 'dirt', z: 0 },
-      { idx: [1,3,7,5], tile: 'grass_top', z: 0 },
-      { idx: [0,2,6,4], tile: 'wood_side', z: 0 },
+      { idx: [0,1,3,2], tile: 'grass_side', z: 0 },  // -z side
+      { idx: [4,5,7,6], tile: 'grass_side', z: 0 },  // +z side
+      { idx: [0,1,5,4], tile: 'grass_top',  z: 0 },  // y=-1 -> with the +X tilt this is the visible top
+      { idx: [2,3,7,6], tile: 'dirt',       z: 0 },  // y=+1 -> underside
+      { idx: [1,3,7,5], tile: 'grass_side', z: 0 },  // +x side
+      { idx: [0,2,6,4], tile: 'grass_side', z: 0 },  // -x side
     ];
     for (const f of faces) f.z = (verts[f.idx[0]].z + verts[f.idx[1]].z + verts[f.idx[2]].z + verts[f.idx[3]].z) / 4;
     // smaller z projects larger (nearer), so draw farthest (largest z) first
@@ -5824,7 +5829,7 @@ class Game {
       const d = Math.hypot(this.player.pos.x - sk.pos.x, this.player.pos.z - sk.pos.z);
       // audible whenever the watcher is present within ~32 blocks (a clear floor so you
       // hear your heart the moment it's around), pounding harder as it closes in
-      if (d < 32) heartLv = (0.5 + 0.5 * clamp(1 - d / 24, 0, 1)) * (sk.hunting ? 1 : 0.92);
+      if (d < 32) heartLv = (0.5 + 0.5 * clamp(1 - d / 24, 0, 1)) * (sk.hunting ? 1 : 0.92) * clamp((32 - d) / 6, 0, 1);   // eases in at the edge instead of popping
       // the mimicked screams come from where it lurks and SWELL LOUDER as you close the
       // distance toward it (audible from ~44 blocks, near-deafening right on top) - night only
       if (night) horrorLv = clamp(1 - d / 44, 0, 1);
@@ -6372,13 +6377,14 @@ class Game {
     const p = this.player.pos, ey = p.y + PLAYER_EYE;
     return {
       x: p.x + (Math.random() * 2 - 1) * R, y: ey + (Math.random() * 2 - 1) * R * 0.7, z: p.z + (Math.random() * 2 - 1) * R,
-      dx: (Math.random() * 2 - 1) * 0.22, dy: (Math.random() * 2 - 1) * 0.1, dz: (Math.random() * 2 - 1) * 0.22, ph: Math.random() * 6.28,
+      dx: (Math.random() * 2 - 1) * 0.22, dy: (Math.random() * 2 - 1) * 0.1, dz: (Math.random() * 2 - 1) * 0.22, ph: Math.random() * 6.28, age: 0,
     };
   }
   _updateMotes(dt) {
     const R = 13, p = this.player.pos, ey = p.y + PLAYER_EYE;
     if (!this.motes) { this.motes = []; for (let i = 0; i < 150; i++) this.motes.push(this._newMote(R)); }
     for (const m of this.motes) {
+      m.age = (m.age || 0) + dt;
       m.x += m.dx * dt; m.z += m.dz * dt; m.y += m.dy * dt + Math.sin(this._clock * 0.6 + m.ph) * 0.0016;
       if (Math.abs(m.x - p.x) > R || Math.abs(m.z - p.z) > R || Math.abs(m.y - ey) > R * 0.72) Object.assign(m, this._newMote(R));
     }
@@ -6389,7 +6395,7 @@ class Game {
     const col = tile % COLS, row = (tile / COLS) | 0;
     const u0 = (col * T + eps) / aW, u1 = (col * T + T - eps) / aW, v0 = (row * T + eps) / aH, v1 = (row * T + T - eps) / aH;
     const v = [], idx = [];
-    for (const m of this.motes) appendCross(v, idx, m.x, m.y - 0.045, m.z, 0.09, 0.09, u0, v0, u1, v1, 1.6);
+    for (const m of this.motes) appendCross(v, idx, m.x, m.y - 0.045, m.z, 0.09, 0.09, u0, v0, u1, v1, 1.6 * Math.min(1, (m.age || 0) * 1.2));
     if (idx.length) r.drawDynamicDecal(new Float32Array(v), new Uint32Array(idx));
   }
 
