@@ -158,7 +158,7 @@
     <button id="btnContinue" class="btn">Continue</button>
     <button id="btnNew"      class="btn">New World</button>
     <button id="btnSettings" class="btn">Settings</button>
-    <div class="ver">build 8 &bull; 2026-06-30 &bull; canopy-drape + crawl-run</div>
+    <div class="ver">build 9 &bull; 2026-06-30 &bull; canopy connected + off the ground</div>
     <div class="hint">Click "New World" to begin &nbsp;&bull;&nbsp; click the screen to capture the mouse</div>
   </div>
 
@@ -4106,16 +4106,19 @@ class Stalker {
     this.modeT = 5 + Math.random() * 5;
     const tree = this._findTree(player);
     const r = Math.random();
-    // canopy drape needs real vertical room (tall trunk) so it hangs clear below the
-    // leaves; on short trees it'd reach the ground, so those roll into a peek instead.
-    const tallEnough = tree && (tree.leafBottom - tree.h) >= 4;
-    if (tallEnough && r < 0.42) {                     // ~42% drape over the canopy edge, head hanging down
+    // canopy drape needs real open air below the leaves at the SPOT it hangs, or it clips
+    // into the ground. Check the ground right at the player-facing drape point (1.1 out).
+    let cax = 0, caz = 1, cDropX = 0, cDropZ = 0, canopyOK = false;
+    if (tree) {
+      cax = tree.x - player.pos.x; caz = tree.z - player.pos.z; const cl = Math.hypot(cax, caz) || 1; cax /= cl; caz /= cl;
+      cDropX = tree.x - cax * 1.1; cDropZ = tree.z - caz * 1.1;
+      const dg = this.world.heightAt(Math.floor(cDropX), Math.floor(cDropZ));
+      canopyOK = (tree.leafBottom - dg) >= 4;          // >=4 blocks of clear air below the leaves here
+    }
+    if (canopyOK && r < 0.42) {                        // ~42% drape over the canopy edge, head hanging down
       this.mode = 'canopy'; this.tree = tree; this.hang = 1; this.drape = 0; this.crawlA = (Math.random() - 0.5) * 1.2;
-      // latch the player-facing side of the canopy; it pours over THAT rim so the
-      // draped head/torso hang into open air toward the viewer (re-curls each appearance)
-      let ax = tree.x - player.pos.x, az = tree.z - player.pos.z; const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;
-      this.canopyDir = { x: ax, z: az };
-      this.pos.set(tree.x - ax * 2.1, (tree.leafBottom || tree.h + 5), tree.z - az * 2.1);   // pos.y = the leaf underside
+      this.canopyDir = { x: cax, z: caz };             // player-facing rim it pours over
+      this.pos.set(cDropX, tree.leafBottom, cDropZ);   // pos.y = the leaf underside
     } else if (tree && r < 0.84) {                   // ~42% hide BEHIND the trunk and peek out
       this.mode = 'peek'; this.tree = tree; this.hang = 0; this.drape = 0; this.peek = 0; this.peekPhase = 'hidden';
       this.peekT = 0.5 + Math.random() * 1.2; this.peekSide = Math.random() < 0.5 ? 1 : -1;
@@ -4202,9 +4205,9 @@ class Stalker {
       this.drape = Math.min(1, this.drape + dt * 0.9);        // curl over the rim (dynamic, ~1.1s)
       this.crawlA += dt * 0.32;                                // slow side-to-side creep ALONG the player-facing rim
       const ax = this.canopyDir ? this.canopyDir.x : 0, az = this.canopyDir ? this.canopyDir.z : 1;
-      const sw = Math.sin(this.crawlA) * 0.9;                  // shift laterally (perp = -az, ax) — stays in view
-      goalX = this.tree.x - ax * 2.1 + (-az) * sw;
-      goalZ = this.tree.z - az * 2.1 + (ax) * sw;
+      const sw = Math.sin(this.crawlA) * 0.7;                  // shift laterally (perp = -az, ax) — stays in view
+      goalX = this.tree.x - ax * 1.1 + (-az) * sw;
+      goalZ = this.tree.z - az * 1.1 + (ax) * sw;
     } else {                                            // HOLD at the ladder distance in the rear/side band
       this.hang = 0;
       this.lurkT -= dt;
@@ -4436,49 +4439,45 @@ class Stalker {
   // toward the viewer. `drape` (0..1) animates head/arms from a perched crouch to a
   // full hang — the "curling over the edge" motion. Head/neck/arm anchors here MUST
   // match _canopyEyes so the glowing face stays welded. ----
+  // shared head anchor so _canopyMesh + _canopyEyes stay welded. pos.y = leaf underside;
+  // the head hangs ~2 below it (kept above the ground by the _pickMode clearance check).
   _canopyAnchors() {
     const dr = Math.max(0, Math.min(1, this.drape || 0));
-    const sw = Math.sin(this.t * 0.9) * 0.05 * dr;           // slow lateral life-sway
-    const sway2 = Math.sin(this.t * 0.7) * 0.06 * dr;        // pendulum of the hung head
-    const headCy = -1.8 - 0.95 * dr + sway2 * 0.25;          // head CENTRE: droops below the leaves (hangs at a menacing mid-height, clear of the ground)
-    const headCz = -0.42 - 0.34 * dr;                        // out over the lip toward the player
-    return { dr, sw, sway2, headCy, headCz };
+    const sw = Math.sin(this.t * 0.9) * 0.04 * dr;
+    const headCy = -2.05, headCz = -0.55;                    // head centre: below the leaves, leaned forward over the edge
+    return { dr, sw, headCy, headCz };
   }
   _canopyMesh() {
     const v = [], i = [];
     const cos = this._cos, sin = this._sin, ox = this.pos.x, oy = this.pos.y, oz = this.pos.z, t = this.t;
     const LIMB = [0.5, 0, 1, 0.5], TORSO = [0, 0, 0.5, 0.5], HEAD = [0, 0.5, 0.5, 1];
-    const { dr, sw, sway2, headCy, headCz } = this._canopyAnchors();
+    const { dr, sw } = this._canopyAnchors();
+    const sy = Math.sin(t * 0.7) * 0.05 * dr;                          // gentle pendulum sway of the hung body
     const cb = (cx, cy, cz, w, h, d, uv, b) => boxRot(v, i, ox, oy, oz, cos, sin, cx - w / 2, cy - h / 2, cz - d / 2, w, h, d, uv[0], uv[1], uv[2], uv[3], b === undefined ? 1 : b, 0, 0, null);
-    // pos.y = leaf underside. The LOWER body grips the leaf-top up in the canopy (the "on
-    // top" anchor, mostly hidden); the body then FOLDS over the bottom rim and the upper
-    // torso + head + arms hang straight DOWN into the open air BELOW the leaves — fully
-    // visible. `dr` lowers the head/arms as it pours itself over the edge.
-    for (const s of [-1, 1]) {                                          // hind legs gripping the leaf-top (up in the foliage)
-      const lx = s * 0.26, fx = Math.sin(t * 5 + s) * 0.02;
-      cb(lx, 1.55, 0.40, 0.22, 0.85, 0.34, LIMB);                      // thigh up to the hip
-      cb(lx, 2.05, 0.88 + fx, 0.22, 0.34, 0.72, LIMB);                 // shin reaching back onto the leaves
-      cb(lx - 0.02 * s, 1.72, 1.28, 0.24, 0.52, 0.18, LIMB);           // hooked claws dug into the leaf-top
+    // ONE CONTINUOUS body (every box overlaps its neighbour by >=0.2 so there are NO gaps),
+    // curling from the grip legs up in the leaves (leaning BACK +z over the canopy) down and
+    // FORWARD (-z, toward you) so the torso + head hang openly below the leaves, head lowest.
+    for (const s of [-1, 1]) {                                          // hind legs hooking back over the leaf edge (grip)
+      const lx = s * 0.28, fx = Math.sin(t * 5 + s) * 0.02;
+      cb(lx, 1.55, 0.50 + fx, 0.24, 0.55, 0.40, LIMB);                 // shin/claws hooked back onto the leaf-top (+z)
+      cb(lx, 1.05, 0.24, 0.24, 0.75, 0.34, LIMB);                     // thigh down to the hip
     }
-    cb(0, 1.42, 0.18, 0.50, 0.50, 0.44, TORSO);                        // pelvis on the canopy
-    cb(0, 1.80, 0.52, 0.10, 0.95, 0.12, TORSO);                        // spine ridge up the back
-    // the waist FOLDS over the bottom rim (the visible drape): hip (up) -> chest (below)
-    cb(sway2 * 0.3, 0.55, -0.05, 0.48, 1.55, 0.40, TORSO);             // lower torso bending over the edge
-    // upper body hangs DOWN below the rim, in open air (this is what the player sees)
-    cb(sway2 * 0.5, -0.85, -0.22, 0.56, 0.82, 0.40, TORSO);            // chest
-    cb(sway2 * 0.6, -1.45, -0.34, 0.66, 0.34, 0.36, TORSO);           // shoulders
-    // long neck + the head drooping at the bottom, face toward the player (-z)
-    const neckMid = (-1.45 + headCy) / 2;
-    cb(sw, neckMid, (-0.34 + headCz) / 2, 0.20, Math.abs(-1.45 - headCy) + 0.12, 0.20, TORSO);  // neck shoulders -> head
-    cb(sw, headCy, headCz, 0.46, 0.54, 0.42, HEAD);                    // skull
-    cb(sw, headCy - 0.46, headCz + 0.02, 0.30, 0.24, 0.26, HEAD);     // jaw/chin (lowest)
-    cb(sw, headCy + 0.06, headCz - 0.20, 0.32, 0.32, 0.20, HEAD, 0.45);  // dark gullet backing the glowing maw
-    // long arms dangling straight DOWN past the head toward the viewer
+    cb(0, 1.55, 0.62, 0.10, 0.9, 0.12, TORSO);                         // spine ridge over the back
+    cb(0 + sy * 0.2, 0.85, 0.20, 0.50, 0.90, 0.44, TORSO);             // pelvis  (overlaps thighs)
+    cb(0 + sy * 0.4, 0.15, 0.00, 0.50, 0.90, 0.44, TORSO);             // belly   (overlaps pelvis)
+    cb(0 + sy * 0.6, -0.55, -0.22, 0.54, 0.90, 0.42, TORSO);           // chest   (overlaps belly)
+    cb(0 + sy * 0.8, -1.10, -0.36, 0.66, 0.55, 0.38, TORSO);           // shoulders (overlaps chest)
+    cb(sw, -1.55, -0.46, 0.24, 0.60, 0.24, TORSO);                     // neck    (overlaps shoulders)
+    const { headCy, headCz } = this._canopyAnchors();
+    cb(sw, headCy, headCz, 0.48, 0.72, 0.44, HEAD);                    // skull   (overlaps neck; faces the player)
+    cb(sw, headCy - 0.42, headCz - 0.02, 0.34, 0.34, 0.30, HEAD);      // jaw/chin (lowest; overlaps skull)
+    cb(sw, headCy + 0.02, headCz - 0.24, 0.34, 0.34, 0.16, HEAD, 0.45);// dark gullet backing the glowing maw (front)
+    // long arms hanging down the front, overlapping the shoulders -> alongside the head
     for (const s of [-1, 1]) {
-      const ax = s * 0.40, aw = Math.sin(t * 0.8 + s * 2) * 0.05 * dr;
-      cb(ax, -1.5, -0.34, 0.16, 0.60, 0.18, LIMB);                                          // upper arm
-      cb(ax + aw, -2.15 - 0.35 * dr, -0.46, 0.15, 0.95, 0.17, LIMB);                        // forearm
-      for (let f = 0; f < 3; f++) cb(ax + aw - 0.05 + f * 0.05, -2.75 - 0.35 * dr + Math.sin(t * 4 + f) * 0.02 * dr, -0.52, 0.05, 0.38, 0.05, LIMB);  // claws alongside the head
+      const ax = s * 0.42, aw = Math.sin(t * 0.8 + s * 2) * 0.04 * dr;
+      cb(ax, -1.30, -0.42, 0.17, 0.62, 0.18, LIMB);                    // upper arm (overlaps shoulders)
+      cb(ax + aw, -1.95, -0.50, 0.16, 0.80, 0.17, LIMB);               // forearm  (overlaps upper arm)
+      cb(ax + aw, -2.55, -0.54, 0.16, 0.55, 0.16, LIMB);               // clawed hand
     }
     return { verts: new Float32Array(v), idx: new Uint32Array(i) };
   }
@@ -4488,14 +4487,14 @@ class Stalker {
     const glowTile = Blocks._tileNames['eye_glow'], eyeTile = Blocks._tileNames['eye'], mawTile = Blocks._tileNames['maw'];
     const { sw, headCy, headCz } = this._canopyAnchors();
     const bloom = this.mouth, rest = Math.max(0, 1 - bloom * 2);
+    const fz = headCz - 0.24;                                          // the head's front (-z) face, toward the player
     const eglow = (lx, ly, lz, w, h, d, br, tl) => boxRotTile(v, i, ox, oy, oz, cos, sin, lx - w / 2, ly - h / 2, lz - d / 2, w, h, d, tl === undefined ? glowTile : tl, br, 2, 0, null);
-    // eyes + maw on the drooping head's front (-z) face (openly visible below the leaves)
-    const eyeY = headCy + 0.13, eyeZ = headCz - 0.02, eyeBr = 1.25 + rest * 0.4;
-    eglow(-0.13 + sw, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);     // soft halo
-    eglow(0.13 + sw, eyeY, eyeZ + 0.012, 0.22, 0.22, 0.04, 0.5);
-    eglow(-0.13 + sw, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
-    eglow(0.13 + sw, eyeY, eyeZ, 0.16, 0.16, 0.05, eyeBr, eyeTile);
-    const mcx = sw, mcy = headCy - 0.17, mcz = headCz - 0.04, mawReach = 0.11 + bloom * 0.42, NSEG = 8;
+    const eyeY = headCy + 0.16, eyeBr = 1.25 + rest * 0.4;             // eyes high on the face, maw below
+    eglow(-0.13 + sw, eyeY, fz + 0.012, 0.22, 0.22, 0.04, 0.5);        // soft halo
+    eglow(0.13 + sw, eyeY, fz + 0.012, 0.22, 0.22, 0.04, 0.5);
+    eglow(-0.13 + sw, eyeY, fz, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    eglow(0.13 + sw, eyeY, fz, 0.16, 0.16, 0.05, eyeBr, eyeTile);
+    const mcx = sw, mcy = headCy - 0.12, mcz = fz - 0.02, mawReach = 0.11 + bloom * 0.42, NSEG = 8;
     for (let p = 0; p < 5; p++) {
       const ang = -1.5708 + p * 1.25664, rx = Math.cos(ang), ry = Math.sin(ang);
       for (let j = 0; j <= NSEG; j++) {
