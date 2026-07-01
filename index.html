@@ -158,7 +158,7 @@
     <button id="btnContinue" class="btn">Continue</button>
     <button id="btnNew"      class="btn">New World</button>
     <button id="btnSettings" class="btn">Settings</button>
-    <div class="ver">build 11 &bull; 2026-07-01 &bull; craft-audit pass: 39 fixes</div>
+    <div class="ver">build 12 &bull; 2026-07-01 &bull; full backlog cleared: 97 audit fixes</div>
     <div class="hint">Click "New World" to begin &nbsp;&bull;&nbsp; click the screen to capture the mouse</div>
   </div>
 
@@ -219,7 +219,6 @@ const CHUNK_SX = 16;     // chunk size on X
 const CHUNK_SZ = 16;     // chunk size on Z
 const CHUNK_SY = 256;    // chunk height on Y (the world is one chunk tall)
 const SEA_LEVEL = 62;    // water fills up to (and including) this Y
-const BEDROCK_Y = 0;     // indestructible floor
 const GRAVITY = 28.0;    // blocks / second^2 (tuned to feel like ~9.8 m/s gravity)
 const TERMINAL_V = 60.0; // max fall speed
 const JUMP_VELOCITY = 8.6;
@@ -229,17 +228,6 @@ const PLAYER_EYE = 1.62; // eye offset from feet
 const REACH = 5.0;       // how far the player can place/break blocks
 const DAY_LENGTH = 600;  // seconds for a full day/night cycle (10 minutes)
 const TICK = 1 / 60;     // fixed physics timestep
-
-/* Web-GL chunk meshing emits these face directions. Order matters: it lines up
-   with the per-face brightness + the neighbour lookups in the mesher. */
-const FACE = {
-  TOP:    {n:[0, 1, 0], shade:1.00},
-  BOTTOM: {n:[0,-1, 0], shade:0.50},
-  NORTH:  {n:[0, 0,-1], shade:0.80}, // -Z
-  SOUTH:  {n:[0, 0, 1], shade:0.80}, // +Z
-  WEST:   {n:[-1,0, 0], shade:0.62}, // -X
-  EAST:   {n:[1, 0, 0], shade:0.62}, // +X
-};
 
 /* ===========================================================================
    SECTION 1 - MATH:  Vec3  and  Mat4
@@ -344,7 +332,6 @@ const Mat4 = {
 /* small scalar helpers used all over the place */
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 const lerp  = (a, b, t) => a + (b - a) * t;
-const smoothstep = (t) => t * t * (3 - 2 * t);
 // blend two "#rrggbb" / [r,g,b] colours; returns [r,g,b] 0-255
 function mixRGB(a, b, t) {
   return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
@@ -600,6 +587,7 @@ const Blocks = {
       noisy(c, [110, 110, 114], 10, 111);
       // irregular stone blobs separated by dark mortar
       c.fillStyle = 'rgba(70,70,74,0.9)';
+      c.fillRect(0, 7, 16, 2); c.fillRect(7, 0, 2, 16);        // the mortar seams themselves
       const cells = [[0,0,7,7],[8,0,7,5],[0,8,5,7],[6,9,9,6],[8,6,7,3]];
       for (const [x,y,w,h] of cells) { c.strokeStyle='rgba(60,60,64,0.9)'; c.strokeRect(x+0.5,y+0.5,w,h); }
       speckle(c, [140,140,144], 20, 112);
@@ -672,16 +660,6 @@ const Blocks = {
       speckle(c, [110, 110, 114], 14, 243, 1);
     });
     // ---- mob skins (not blocks; used by the mob renderer) -----------
-    tile('mob_critter', c => {                 // friendly pink critter
-      noisy(c, [222, 150, 162], 14, 251);
-      c.fillStyle = '#3a2a2a'; c.fillRect(4, 5, 2, 2); c.fillRect(10, 5, 2, 2);   // eyes
-      c.fillStyle = '#b05a6a'; c.fillRect(6, 10, 4, 2);                            // snout
-    });
-    tile('mob_lurker', c => {                  // hostile green lurker
-      noisy(c, [78, 132, 84], 16, 261);
-      c.fillStyle = '#101810'; c.fillRect(4, 5, 2, 2); c.fillRect(10, 5, 2, 2);   // eyes
-      c.fillStyle = '#203020'; c.fillRect(5, 10, 6, 2);                            // mouth
-    });
     // ---- proper mob body parts (no smiley faces) -------------------
     tile('pig_skin',  c => { blotch(c, [226, 150, 158], 22, 311, 4); speckle(c, [205, 130, 140], 10, 314, 1); });
     tile('pig_snout', c => { blotch(c, [208, 126, 136], 14, 312, 3); c.fillStyle = '#6e323c'; c.fillRect(4, 7, 2, 3); c.fillRect(10, 7, 2, 3); });
@@ -793,7 +771,6 @@ const Blocks = {
     // ---- an open doorway: side jambs, transparent middle (you can walk through) ----
     tile('door_open', c => {
       c.clearRect(0, 0, T, T);
-      const jamb = (x) => { noisy(c, [150, 112, 66], 10, 412); };
       c.fillStyle = '#8a6a3e';
       c.fillRect(0, 0, 4, T); c.fillRect(12, 0, 4, T); c.fillRect(0, 0, T, 3);  // left+right jamb + lintel
       c.strokeStyle = 'rgba(70,48,24,0.9)'; c.lineWidth = 1; c.strokeRect(0.5, 0.5, 3, 15); c.strokeRect(12.5, 0.5, 3, 15);
@@ -835,6 +812,7 @@ const Blocks = {
       const tx = (i % this.COLS) * T, ty = ((i / this.COLS) | 0) * T;
       ctx.save();
       ctx.translate(tx, ty);
+      ctx.beginPath(); ctx.rect(0, 0, T, T); ctx.clip();   // a painter can never bleed into a neighbouring tile
       t.fn(ctx);
       ctx.restore();
       this._tileNames[t.name] = i;
@@ -847,7 +825,7 @@ const Blocks = {
     // helper to register a block def
     const def = (id, o) => { this.defs[id] = Object.assign({
       name: 'block', solid: true, opaque: true, transparent: false,
-      liquid: false, breakable: true, hardness: 0.6, anim: 0, emissive: 0,
+      liquid: false, breakable: true, hardness: 0.6, anim: 0,
     }, o); };
 
     def(B.AIR,    { name: 'Air', solid: false, opaque: false, breakable: false });
@@ -864,19 +842,19 @@ const Blocks = {
     def(B.BRICKS, { name: 'Kiln-Fired Brick', all: TI('bricks'), hardness: 1.6 });
     def(B.GLASS,  { name: 'Scrying Glass', all: TI('glass'), opaque: false, transparent: true, hardness: 0.3 });
     def(B.WATER,  { name: 'Stillwater', all: TI('water'), solid: false, opaque: false, transparent: true, liquid: true, breakable: false, anim: 1 });
-    def(B.LAVA,   { name: 'Emberblood', all: TI('lava'), solid: false, opaque: false, transparent: true, liquid: true, breakable: false, anim: 2, emissive: 1 });
+    def(B.LAVA,   { name: 'Emberblood', all: TI('lava'), solid: false, opaque: false, transparent: true, liquid: true, breakable: false, anim: 2 });
     def(B.COAL,   { name: 'Cinder Vein', all: TI('coal_ore'), hardness: 2.0 });
     def(B.IRON,   { name: 'Grey Iron Vein', all: TI('iron_ore'), hardness: 2.5 });
     def(B.GOLD,   { name: 'Gilt Vein', all: TI('gold_ore'), hardness: 2.5 });
     def(B.DIAMOND,{ name: 'Starlit Vein', all: TI('diamond_ore'), hardness: 3.0 });
-    def(B.REDSTONE,{ name: 'Pulsewire Vein', all: TI('redstone_ore'), hardness: 2.5, anim: 3, emissive: 0.5 });
+    def(B.REDSTONE,{ name: 'Pulsewire Vein', all: TI('redstone_ore'), hardness: 2.5, anim: 3 });
     def(B.SNOW,   { name: 'Quiet Snow', all: TI('snow'), hardness: 0.3 });
     def(B.ICE,    { name: 'Black Ice', all: TI('ice'), opaque: false, transparent: true, hardness: 0.5 });
     def(B.CACTUS, { name: 'Thornflesh', faces: u(TI('cactus_top'),TI('cactus_top'),TI('cactus_side')), opaque: false, hardness: 0.4 });
     def(B.SANDSTONE,{ name: 'Bonded Sand', faces: u(TI('sandstone_top'),TI('sandstone_top'),TI('sandstone')), hardness: 0.8 });
     def(B.OBSIDIAN,{ name: 'Nightglass', all: TI('obsidian'), hardness: 6.0 });
     def(B.BEDROCK,{ name: 'Worldspine', all: TI('bedrock'), breakable: false, hardness: 999 });
-    def(B.CURSED, { name: 'Effigy', all: TI('cursed_plushie'), opaque: false, hardness: 0.4, emissive: 0.3, anim: 3 });
+    def(B.CURSED, { name: 'Effigy', all: TI('cursed_plushie'), opaque: false, hardness: 0.4, anim: 3 });
     // ---- craftable functional blocks ----
     def(B.CRAFT_TABLE, { name: 'Workbench', faces: u(TI('craft_table_top'), TI('planks'), TI('craft_table_side')), hardness: 1.2 });
     def(B.DOOR,      { name: 'Hollow Door', all: TI('door'), hardness: 1.0 });                                   // closed: solid
@@ -984,6 +962,7 @@ const FRAGMENT_SRC = `
     light = max(light, 0.14);
     // handheld flashlight: a bright cone of light along the view direction
     float torchLit = 0.0;
+    float torchFogClear = 0.0;                 // fog-clear uses the SAME distance falloff as the light pool
     if (uTorch > 0.001) {
       vec3 tf = vWorld - uEye; float td = length(tf);
       float c = dot(tf / max(td, 0.001), uTorchDir);
@@ -991,6 +970,7 @@ const FRAGMENT_SRC = `
       float at = clamp(1.0 - td / 30.0, 0.0, 1.0);
       torchLit = uTorch * cone * at;
       light += torchLit * at * 1.8;
+      torchFogClear = torchLit * at;
     }
     light = min(light, 1.5);
     vec3 col = tex.rgb * light;
@@ -999,7 +979,7 @@ const FRAGMENT_SRC = `
     // glowing/emissive things punch through fog so they stand out in the dark
     if (vAnim > 1.5) fog = mix(fog, 1.0, 0.7);
     // the flashlight clears fog ONLY inside its cone (not across the whole view)
-    fog = max(fog, clamp(torchLit * 1.7, 0.0, 0.92));
+    fog = max(fog, clamp(torchFogClear * 1.7, 0.0, 0.92));
     col = mix(uFogColor, col, fog);
     gl_FragColor = vec4(col, mix(tex.a, 1.0, uForceAlpha));
   }`;
@@ -1067,15 +1047,31 @@ class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
     // prefer WebGL2 (native 32-bit indices); fall back to WebGL1 + extension
-    let gl = canvas.getContext('webgl2', { alpha: true, antialias: false, depth: true });
+    let gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: true });   // opaque backdrop: the sky fills every pixel
     this.isGL2 = !!gl;
     if (!gl) {
       gl = canvas.getContext('webgl', { alpha: true, antialias: false, depth: true });
       if (!gl) throw new Error('WebGL is not supported by this browser.');
       const ext = gl.getExtension('OES_element_index_uint');
       if (!ext) throw new Error('32-bit index buffers are not supported.');
+      // VAO polyfill so the chunk fast-path works on the WebGL1 fallback too
+      const vx = gl.getExtension('OES_vertex_array_object');
+      gl.createVertexArray = () => (vx ? vx.createVertexArrayOES() : null);
+      gl.deleteVertexArray = (v) => { if (vx && v) vx.deleteVertexArrayOES(v); };
+      gl.bindVertexArray = (v) => { if (vx) vx.bindVertexArrayOES(v); };
     }
     this.gl = gl;
+    // GPU context loss (driver reset, tab eviction): without this the game freezes
+    // to a dead canvas with no explanation. Save-state is untouched — tell the
+    // player to reload rather than leaving them staring at the void.
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      document.body.innerHTML =
+        '<div style="color:#fff;font-family:monospace;padding:40px;line-height:1.6">' +
+        '<h2>Graphics context lost</h2>' +
+        '<p>The GPU driver reset (or the tab was evicted). Your last save is intact.</p>' +
+        '<p><a href="javascript:location.reload()" style="color:#9bff7a">Reload the game</a></p></div>';
+    });
     this.indexType = gl.UNSIGNED_INT;
 
     // compile + link the world shader program
@@ -1218,15 +1214,20 @@ class Renderer {
   _uploadBuffers(existing, part) {
     const gl = this.gl;
     if (!part || part.idx.length === 0) {
-      if (existing) { gl.deleteBuffer(existing.vbo); gl.deleteBuffer(existing.ibo); }
+      if (existing) { gl.deleteBuffer(existing.vbo); gl.deleteBuffer(existing.ibo); if (existing.vao) gl.deleteVertexArray(existing.vao); }
       return null;
     }
     let b = existing;
-    if (!b) b = { vbo: gl.createBuffer(), ibo: gl.createBuffer(), count: 0 };
+    if (!b) b = { vbo: gl.createBuffer(), ibo: gl.createBuffer(), vao: gl.createVertexArray(), count: 0 };
+    // record the attribute layout in a VAO once at upload; each draw is then a
+    // single bindVertexArray instead of 4x enable+pointer calls per chunk per pass
+    if (b.vao) gl.bindVertexArray(b.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, b.vbo);
     gl.bufferData(gl.ARRAY_BUFFER, part.verts, gl.STATIC_DRAW);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b.ibo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, part.idx, gl.STATIC_DRAW);
+    this._bindAttribs();
+    gl.bindVertexArray(null);
     b.count = part.idx.length;
     return b;
   }
@@ -1235,7 +1236,7 @@ class Renderer {
     const gl = this.gl;
     for (const k of ['op', 'tr']) {
       const b = chunk.glMesh[k];
-      if (b) { gl.deleteBuffer(b.vbo); gl.deleteBuffer(b.ibo); }
+      if (b) { gl.deleteBuffer(b.vbo); gl.deleteBuffer(b.ibo); if (b.vao) gl.deleteVertexArray(b.vao); }
     }
     chunk.glMesh = null;
   }
@@ -1288,12 +1289,12 @@ class Renderer {
       if (!c.glMesh || !c.glMesh.op) continue;
       if (!this._chunkVisible(c)) continue;
       const b = c.glMesh.op;
-      gl.bindBuffer(gl.ARRAY_BUFFER, b.vbo);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b.ibo);
-      this._bindAttribs();
+      if (b.vao) gl.bindVertexArray(b.vao);
+      else { gl.bindBuffer(gl.ARRAY_BUFFER, b.vbo); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b.ibo); this._bindAttribs(); }  // ancient GL1 without OES_vao
       gl.drawElements(gl.TRIANGLES, b.count, this.indexType, 0);
       drawn++;
     }
+    gl.bindVertexArray(null);
     return drawn;
   }
 
@@ -1302,17 +1303,24 @@ class Renderer {
   drawDynamic(verts, idx) {
     if (idx.length === 0) return;
     const gl = this.gl;
-    if (!this._dyn) this._dyn = { vbo: gl.createBuffer(), ibo: gl.createBuffer() };
-    gl.bindBuffer(gl.ARRAY_BUFFER, this._dyn.vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this._dyn.ibo);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.DYNAMIC_DRAW);
+    if (!this._dyn) this._dyn = { vbo: gl.createBuffer(), ibo: gl.createBuffer(), vcap: 0, icap: 0 };
+    const d = this._dyn;
+    gl.bindVertexArray(null);                        // dynamic draws use the default attrib state, never a chunk VAO
+    // keep the GPU storage and bufferSubData into it; only reallocate on growth
+    // (full bufferData every call reallocated driver storage each dynamic draw)
+    gl.bindBuffer(gl.ARRAY_BUFFER, d.vbo);
+    if (verts.byteLength > d.vcap) { gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW); d.vcap = verts.byteLength; }
+    else gl.bufferSubData(gl.ARRAY_BUFFER, 0, verts);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, d.ibo);
+    if (idx.byteLength > d.icap) { gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.DYNAMIC_DRAW); d.icap = idx.byteLength; }
+    else gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, idx);
     this._bindAttribs();
     gl.drawElements(gl.TRIANGLES, idx.length, this.indexType, 0);
   }
 
   // like drawDynamic, but with a chosen pack texture bound (the creature skin);
-  // alpha-tested + double-sided so transparent skin pixels are cut out cleanly
+  // double-sided and FORCED OPAQUE (no alpha test): empty skin pixels render as
+  // solid eldritch black rather than being cut out
   drawDynamicTex(verts, idx, texName) {
     if (idx.length === 0 || !this.packTex || !this.packTex[texName]) return;
     const gl = this.gl;
@@ -1389,11 +1397,11 @@ class Renderer {
       if (!c.glMesh || !c.glMesh.tr) continue;
       if (!this._chunkVisible(c)) continue;
       const b = c.glMesh.tr;
-      gl.bindBuffer(gl.ARRAY_BUFFER, b.vbo);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b.ibo);
-      this._bindAttribs();
+      if (b.vao) gl.bindVertexArray(b.vao);
+      else { gl.bindBuffer(gl.ARRAY_BUFFER, b.vbo); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, b.ibo); this._bindAttribs(); }
       gl.drawElements(gl.TRIANGLES, b.count, this.indexType, 0);
     }
+    gl.bindVertexArray(null);
     gl.depthMask(true);
     gl.disable(gl.BLEND);
   }
@@ -1530,7 +1538,6 @@ class Chunk {
     this.generated = false;
     this.dirty = true;      // needs (re)meshing
     this.glMesh = null;     // GPU buffers (filled by the renderer)
-    this.empty = false;     // true if no visible geometry
   }
   // local index for (x,y,z) inside the chunk
   idx(x, y, z) { return x + CHUNK_SX * (z + CHUNK_SZ * y); }
@@ -1563,6 +1570,16 @@ class Chunk {
     const x0 = this.cx * CHUNK_SX, z0 = this.cz * CHUNK_SZ;
     const atlasW = Blocks.atlas.width, atlasH = Blocks.atlas.height;
     const T = Blocks.TILE, COLS = Blocks.COLS, eps = 0.5;
+    // fast neighbour sampler: in-chunk lookups hit the typed array directly; only
+    // the ~2% of samples that cross the border pay the string-keyed Map lookup
+    const blocks = this.blocks, SX = CHUNK_SX, SZ = CHUNK_SZ;
+    const gb = (lx, ly, lz) => {
+      if (lx >= 0 && lx < SX && lz >= 0 && lz < SZ) {
+        if (ly < 0 || ly >= CHUNK_SY) return B.AIR;
+        return blocks[((ly * SZ) + lz) * SX + lx];
+      }
+      return world.getBlock(x0 + lx, ly, z0 + lz);
+    };
 
     for (let y = 0; y < CHUNK_SY; y++) {
       for (let z = 0; z < CHUNK_SZ; z++) {
@@ -1579,7 +1596,7 @@ class Chunk {
 
           for (let f = 0; f < 6; f++) {
             const fd = FACE_DATA[f];
-            const nb = world.getBlock(wx + fd.normal[0], wy + fd.normal[1], wz + fd.normal[2]);
+            const nb = gb(x + fd.normal[0], y + fd.normal[1], z + fd.normal[2]);
             if (!shouldDrawFace(id, nb)) continue;
 
             // atlas tile -> uv rectangle (with a half-pixel inset to stop bleed)
@@ -1588,25 +1605,28 @@ class Chunk {
             const px0 = col * T, py0 = row * T;
             const base = target.v.length / 7;
 
+            let l0 = 0, l1 = 0, l2 = 0, l3 = 0;
             for (let k = 0; k < 4; k++) {
               const vp = fd.verts[k], uvc = fd.uv[k], ao = fd.ao[k];
               // sample the three AO neighbours (only opaque blocks shade)
-              const o1 = Blocks.isOpaque(world.getBlock(wx + ao.s1[0], wy + ao.s1[1], wz + ao.s1[2])) ? 1 : 0;
-              const o2 = Blocks.isOpaque(world.getBlock(wx + ao.s2[0], wy + ao.s2[1], wz + ao.s2[2])) ? 1 : 0;
-              const oc = Blocks.isOpaque(world.getBlock(wx + ao.c[0],  wy + ao.c[1],  wz + ao.c[2]))  ? 1 : 0;
+              const o1 = Blocks.isOpaque(gb(x + ao.s1[0], y + ao.s1[1], z + ao.s1[2])) ? 1 : 0;
+              const o2 = Blocks.isOpaque(gb(x + ao.s2[0], y + ao.s2[1], z + ao.s2[2])) ? 1 : 0;
+              const oc = Blocks.isOpaque(gb(x + ao.c[0],  y + ao.c[1],  z + ao.c[2]))  ? 1 : 0;
               const light = fd.shade * AO_CURVE[aoValue(o1, o2, oc)] * skyTint;
+              if (k === 0) l0 = light; else if (k === 1) l1 = light; else if (k === 2) l2 = light; else l3 = light;
               const u = (px0 + eps + uvc[0] * (T - 2 * eps)) / atlasW;
               const v = (py0 + eps + uvc[1] * (T - 2 * eps)) / atlasH;
               target.v.push(wx + vp[0], wy + vp[1], wz + vp[2], u, v, light, def.anim);
             }
-            // two triangles for the quad
-            target.i.push(base, base + 1, base + 2, base, base + 2, base + 3);
+            // two triangles for the quad — flip the diagonal so it runs through the
+            // darker AO pair (the fixed split produced anisotropic L-shaped seams)
+            if (l0 + l2 > l1 + l3) target.i.push(base + 1, base + 2, base + 3, base + 1, base + 3, base);
+            else target.i.push(base, base + 1, base + 2, base, base + 2, base + 3);
           }
         }
       }
     }
     this.dirty = false;
-    this.empty = (op.i.length === 0 && tr.i.length === 0);
     // pack into typed arrays for the GPU
     return {
       op: { verts: new Float32Array(op.v), idx: new Uint32Array(op.i) },
@@ -1762,8 +1782,10 @@ class World {
             id = B.BEDROCK;                              // ragged bedrock floor
           } else if (y <= h) {
             // candidate solid; carve caves underground only - keep the top 3
-            // blocks solid so caves never punch surface holes (no floating ground/trees)
-            if (y > 3 && y < h - 2 && this.isCave(wx, y, wz)) {
+            // blocks solid so caves never punch surface holes (no floating ground/trees).
+            // Also keep the below-sea-level band solid in LOW SHORELINE terrain, so a
+            // cave mouth can't breach sideways into the ocean (free-standing water walls)
+            if (y > 3 && y < h - 2 && !(y <= SEA_LEVEL + 1 && h < SEA_LEVEL + 8) && this.isCave(wx, y, wz)) {
               id = (y < 11) ? B.LAVA : B.AIR;            // lava pools deep down
             } else {
               id = this.surfaceBlock(wx, y, wz, h, biome);
@@ -1829,7 +1851,7 @@ class World {
         const wx = gx * G + 1 + (Math.floor(this.hash2(gx, gz, 21) * 2) % 2);
         const wz = gz * G + 1 + (Math.floor(this.hash2(gx, gz, 22) * 2) % 2);
         const h = this.heightAt(wx, wz);
-        if (h <= SEA_LEVEL || h > 96) continue;        // no trees in water / on peaks
+        if (h <= SEA_LEVEL + 1 || h > 96) continue;    // no trees in water, ON BEACH SAND (surface gate is <= SEA_LEVEL+1), or on peaks
         const biome = this.biomeAtH(wx, wz, h);
         const r = this.hash2(gx, gz, 23);              // per-cell probability
         if (biome === BIOME.FOREST) { if (r < 0.78) this.stampTree(chunk, wx, h + 1, wz); }
@@ -1861,10 +1883,14 @@ class World {
       }
     }
     // a bloody note nailed to a tree (infrequent + spread apart from other
-    // notes/dolls, so they don't clump - read together they tell a backstory)
-    if (this.hash2(bx, bz, 7) < 0.02) {
+    // notes/dolls, so they don't clump - read together they tell a backstory).
+    // Spacing uses the coordinate-pure winner test, NOT the live decal lists: the old
+    // "too close to an existing one" check depended on chunk-generation ORDER, so a
+    // reload that streamed chunks in a different order could move notes and orphan
+    // the collected-note keys (respawning collected notes / vanishing seen ones).
+    if (this._decalWins(bx, bz, 7, 0.02, 8)) {
       const k = bx + ',' + bz;
-      if (!this.noteKeys.has(k) && !this.collectedNoteKeys.has(k) && !this._decalTooClose(bx, bz, 16)) {
+      if (!this.noteKeys.has(k) && !this.collectedNoteKeys.has(k)) {
         this.noteKeys.add(k);
         const msg = NOTE_MESSAGES[Math.floor(this.hash2(bx, bz, 9) * NOTE_MESSAGES.length) % NOTE_MESSAGES.length];
         this.notes.push({ x: bx + 0.5, y: by + 1.4, z: bz + 0.5, tx: bx, tz: bz, msg, key: k });
@@ -1872,12 +1898,12 @@ class World {
     }
     // a warding-plushie doll at a tree's base (a prop you walk into to collect).
     // RARE - far rarer than notes - and never adjacent to a note/another doll.
-    if (this.hash2(bx, bz, 13) < 0.0014) {
+    if (this._decalWins(bx, bz, 13, 0.0014, 8)) {
       const k = bx + ',' + bz;
       const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
       const d = dirs[Math.floor(this.hash2(bx, bz, 14) * 4) % 4];
       const px = bx + d[0], pz = bz + d[1];
-      if (!this.plushieKeys.has(k) && !this.collectedPlushieKeys.has(k) && !this._decalTooClose(px, pz, 16)) {
+      if (!this.plushieKeys.has(k) && !this.collectedPlushieKeys.has(k)) {
         this.plushieKeys.add(k);
         this.plushies.push({ x: px + 0.5, y: this.heightAt(px, pz) + 1, z: pz + 0.5, key: k });
       }
@@ -1916,12 +1942,19 @@ class World {
       }
     }
   }
-  // is (x,z) within minD blocks of an existing note or plushie? (keeps them spread)
-  _decalTooClose(x, z, minD) {
-    const m2 = minD * minD;
-    for (const n of this.notes) { const dx = n.tx - x, dz = n.tz - z; if (dx * dx + dz * dz < m2) return true; }
-    for (const pl of this.plushies) { const dx = pl.x - x, dz = pl.z - z; if (dx * dx + dz * dz < m2) return true; }
-    return false;
+  // deterministic decal spacing: (bx,bz) hosts the decal iff it passes the rarity
+  // gate AND no other column within `rad` (Chebyshev) passes the same gate with a
+  // smaller hash. A pure function of coordinates — placement can never depend on
+  // which chunk happened to generate first.
+  _decalWins(bx, bz, salt, gate, rad) {
+    const mine = this.hash2(bx, bz, salt);
+    if (mine >= gate) return false;
+    for (let dx = -rad; dx <= rad; dx++) for (let dz = -rad; dz <= rad; dz++) {
+      if (dx === 0 && dz === 0) continue;
+      const h = this.hash2(bx + dx, bz + dz, salt);
+      if (h < gate && (h < mine || (h === mine && (dx < 0 || (dx === 0 && dz < 0))))) return false;
+    }
+    return true;
   }
   stampCactus(chunk, bx, by, bz) {
     const ch = 1 + (Math.floor(this.hash2(bx, bz, 3) * 3) % 3);
@@ -2081,13 +2114,11 @@ class Player {
 
     this._fallPeak = this.pos.y;     // highest y reached while airborne
     this._sprint = false;
-    this._lastWTap = -1;             // for double-tap-W sprint
     // sprint stamina: a ~7s budget that drains while sprinting; when fully spent
     // it locks out for a cooldown, then refills. Recharges slowly when idle.
     this.sprintMax = 7; this.sprintStamina = 7; this.sprintCD = 0; this.sprintCDMax = 7;
     this.sprinting = false;
     this._regenTimer = 0;
-    this._hungerTimer = 0;
     this._starveTimer = 0;
   }
 
@@ -2122,7 +2153,9 @@ class Player {
     const sneaking = input.isDown('ShiftLeft') || input.isDown('ShiftRight');
     // sprint: double-tap-W (or hold Ctrl) while moving forward, gated by a 7s
     // stamina budget + a hard cooldown once it's fully spent.
-    const wantSprint = (input.sprintLatch || input.isDown('ControlLeft')) && !sneaking
+    // sprint = double-tap W only (the HUD-advertised control). The old ControlLeft
+    // hold invited Ctrl+W — which the browser reserves for CLOSE TAB, losing the run.
+    const wantSprint = input.sprintLatch && !sneaking
                        && input.isDown('KeyW') && this.hunger > 0;
     if (this.sprintCD > 0) {                            // locked out, recovering
       this.sprintCD -= dt; this.sprinting = false;
@@ -2176,6 +2209,7 @@ class Player {
       if (input.isDown('Space') && this.onGround) {
         this.vel.y = JUMP_VELOCITY;
         this.exhaustion += sprinting ? 0.2 : 0.05;
+        if (audio) audio.play('jump');             // the synth had this cue defined but nothing ever triggered it
       }
     }
 
@@ -2185,9 +2219,16 @@ class Player {
     Physics.move(world, this, dt);
     if (sneaking && wasGround && this.onGround && !this.inWater && !this.headInWater) {
       if (!this._hasSupportBelow(world)) {
-        // revert horizontal movement that would leave us hanging in the air
-        this.pos.x = before.x; this.pos.z = before.z;
-        this.vel.x = 0; this.vel.z = 0;
+        // revert per-AXIS so you can still creep diagonally ALONG a ledge edge
+        // (reverting both at once froze any diagonal input at the rim)
+        const nx = this.pos.x, nz = this.pos.z;
+        this.pos.x = before.x;                                   // keep Z, drop X?
+        if (this._hasSupportBelow(world)) { this.vel.x = 0; }
+        else {
+          this.pos.x = nx; this.pos.z = before.z;                // keep X, drop Z?
+          if (this._hasSupportBelow(world)) { this.vel.z = 0; }
+          else { this.pos.x = before.x; this.pos.z = before.z; this.vel.x = 0; this.vel.z = 0; }
+        }
       }
     }
 
@@ -2220,7 +2261,6 @@ class Player {
 
     // ---- exhaustion -> hunger -> health ----------------------------
     if (len > 0) this.exhaustion += (sprinting ? 0.06 : 0.012) * dt * 60;
-    this._hungerTimer += dt;
     if (this.exhaustion >= 4) {
       this.exhaustion -= 4;
       if (this.saturation > 0) this.saturation = Math.max(0, this.saturation - 1);
@@ -2267,6 +2307,7 @@ class Player {
     this.saturation = 5;
     this.air = this.maxAir;
     this.exhaustion = 0;
+    this.sprintStamina = this.sprintMax; this.sprintCD = 0; this.sprinting = false;  // a new life doesn't inherit a winded body
     this.pos = this.spawn.copy();
     this.vel.set(0, 0, 0);
     this._fallPeak = this.pos.y;
@@ -2306,7 +2347,6 @@ class InputManager {
     this.wheel = 0;                 // hotbar scroll accumulator
     this.sprintLatch = false;       // set by double-tap-W
     this._lastW = -1;
-    this.enabled = true;            // ignored while menus are open
     this._bind();
   }
   _bind() {
@@ -2343,7 +2383,15 @@ class InputManager {
       else if (e.button === 2) this.rightHeld = false;
     });
     addEventListener('contextmenu', e => e.preventDefault());
-    addEventListener('wheel', e => { if (this.locked) this.wheel += Math.sign(e.deltaY); }, { passive: true });
+    // accumulate raw deltas and quantize to ~one notch (100px / 3 lines): trackpads
+    // fire dozens of tiny events per flick — per-event Math.sign() skipped many slots
+    addEventListener('wheel', e => {
+      if (!this.locked) return;
+      const d = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;   // line-mode (Firefox) -> px-ish
+      this._wheelAcc = (this._wheelAcc || 0) + d;
+      const steps = Math.trunc(this._wheelAcc / 100);
+      if (steps) { this.wheel += steps; this._wheelAcc -= steps * 100; }
+    }, { passive: true });
     document.addEventListener('pointerlockchange', () => {
       this.locked = (document.pointerLockElement === this.canvas);
     });
@@ -2379,7 +2427,7 @@ class InputManager {
 class AudioEngine {
   constructor() {
     this.ctx = null; this.master = null; this.volume = 0.6;
-    this.musicOn = true; this._ambient = null; this._fanfare = null;
+    this._ambient = null; this._fanfare = null;
     this._mood = 0;                  // 0 = night (brooding) .. 1 = day (cheery)
     this.clipEls = null; this._clipsLoaded = false;   // external mp3 SFX (HTMLAudioElement-based so they work under file://)
   }
@@ -2478,7 +2526,7 @@ class AudioEngine {
     const step = () => {
       if (!this._ambient) return;
       let interval = 3200;
-      if (this.musicOn) {
+      {
         if (this._mood > 0.4) {                                 // daytime: light + lively
           const f = day[i % day.length];
           this._tone(f, 0.5, 'triangle', 0.05);
@@ -2704,16 +2752,6 @@ class InventoryManager {
     return true;
   }
   // can `count` of `id` fully fit (without destroying it)? (conservative)
-  canFit(id, count) {
-    const max = stackMax(id);
-    let room = 0;
-    for (const s of this.slots) {
-      if (s.count === 0) room += max;
-      else if (s.id === id && !s.meta) room += (max - s.count);
-      if (room >= count) return true;
-    }
-    return room >= count;
-  }
 }
 
 class CraftingSystem {
@@ -2917,7 +2955,12 @@ class MobManager {
       if (t < 0 || t > bestT) continue;
       const px = eye.x + dir.x * t, py = eye.y + dir.y * t, pz = eye.z + dir.z * t;
       const dist = Math.hypot(px - cx, py - cy, pz - cz);
-      if (dist < 0.7) { best = m; bestT = t; }
+      if (dist < 0.7) {
+        // line-of-sight: a wall (or glass) between eye and mob blocks the swing
+        const md = Math.hypot(ox, oy, oz) || 1;
+        const hit = raycastVoxel(this.world, eye, new Vec3(ox / md, oy / md, oz / md), md);
+        if (!hit || Math.hypot(hit.x + 0.5 - eye.x, hit.y + 0.5 - eye.y, hit.z + 0.5 - eye.z) > md - 0.6) { best = m; bestT = t; }
+      }
     }
     if (best) {
       // a blade hits harder than bare fists (or a non-weapon tool)
@@ -3078,11 +3121,20 @@ function appendBed(v, idx, world, wx, wy, wz, light) {
   const bl = TN['bed_blanket'], fr = TN['bed_frame'], pw = TN['bed_pillow'];
   const matTiles = [bl, fr, fr, fr, fr, fr];          // top, bottom, N, S, W, E
   const pilTiles = [pw, pw, pw, pw, pw, pw];
-  // locate the partner cell (the other half of the 2-long bed)
+  // locate the partner cell (the other half of the 2-long bed). Prefer a MUTUAL
+  // partner — one whose own first choice is us — so two beds placed side-by-side
+  // pair up correctly instead of one half latching onto the neighbouring bed.
   let pdx = 0, pdz = 0;
-  for (const d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-    if (world.getBlock(wx + d[0], wy, wz + d[1]) === B.BED) { pdx = d[0]; pdz = d[1]; break; }
+  const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const firstBed = (bx, bz) => { for (const d of DIRS) if (world.getBlock(bx + d[0], wy, bz + d[1]) === B.BED) return d; return null; };
+  let fallback = null;
+  for (const d of DIRS) {
+    if (world.getBlock(wx + d[0], wy, wz + d[1]) !== B.BED) continue;
+    if (!fallback) fallback = d;
+    const back = firstBed(wx + d[0], wz + d[1]);
+    if (back && back[0] === -d[0] && back[1] === -d[1]) { pdx = d[0]; pdz = d[1]; fallback = null; break; }
   }
+  if (fallback) { pdx = fallback[0]; pdz = fallback[1]; }
   // mattress slab: inset 0.04 on the OUTER sides, but EXTENDED to the full cell edge
   // on the partner side so the two halves physically butt (no see-through seam gap),
   // then skip the now-shared seam face + the ground-facing bottom.
@@ -3171,6 +3223,7 @@ class UIManager {
   // ---- draw a single item icon (block tile from the atlas, or a custom item)
   drawItemIcon(ctx, id, x, y, s) {
     if (id === 0) return;
+    ctx.save();                                       // icons set lineCap/smoothing — don't leak into later HUD drawing
     if (isBlockId(id)) {
       const tile = Blocks.faceTile(id, 2);            // representative (side) face
       const T = Blocks.TILE, col = tile % Blocks.COLS, row = (tile / Blocks.COLS) | 0;
@@ -3226,6 +3279,7 @@ class UIManager {
         else { ctx.beginPath(); ctx.ellipse(hx, hy - s*0.04, s*0.14, s*0.18, 0.4, 0, 7); ctx.fill(); }  // shovel scoop
       }
     }
+    ctx.restore();
   }
 
   // ---- heart + drumstick glyphs ----------------------------------------
@@ -3573,12 +3627,6 @@ class UIManager {
     ctx.fillStyle = '#000'; ctx.fillText(s, x + 1, y + 1);   // drop shadow
     ctx.fillStyle = '#fff'; ctx.fillText(s, x, y);
   }
-  _compass(yaw) {
-    // yaw=0 faces -Z (North); yaw increases toward +X (East)
-    const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-    const i = Math.round(((yaw / Math.PI) * 4 + 8)) % 8;
-    return dirs[(i + 8) % 8];
-  }
   // a functional compass strip at the top: cardinal marks scroll past a centre
   // pointer as you turn (replaces the old "Facing N" text)
   _drawCompass(ctx, yaw) {
@@ -3586,6 +3634,7 @@ class UIManager {
     ctx.save();
     ctx.fillStyle = 'rgba(0,0,0,0.42)'; ctx.fillRect(cx - hw, cy, hw * 2, 20);
     ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1; ctx.strokeRect(cx - hw + 0.5, cy + 0.5, hw * 2, 20);
+    ctx.beginPath(); ctx.rect(cx - hw, cy - 8, hw * 2, 30); ctx.clip();   // labels SLIDE off the strip edge instead of popping outside it
     const dirs = [['N', 0], ['NE', Math.PI / 4], ['E', Math.PI / 2], ['SE', 3 * Math.PI / 4], ['S', Math.PI], ['SW', -3 * Math.PI / 4], ['W', -Math.PI / 2], ['NW', -Math.PI / 4]];
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (const [label, b] of dirs) {
@@ -3698,7 +3747,8 @@ class UIManager {
     let t0 = performance.now();
     const loop = () => {
       const now = performance.now(), time = (now - t0) / 1000;
-      bg.width = window.innerWidth; bg.height = window.innerHeight;
+      // setting canvas.width DESTROYS and reallocates the backing store — only do it when the window actually resized
+      if (bg.width !== window.innerWidth || bg.height !== window.innerHeight) { bg.width = window.innerWidth; bg.height = window.innerHeight; }
       const W = bg.width, Hh = bg.height;
       // sky gradient
       const g = bx.createLinearGradient(0, 0, 0, Hh);
@@ -3813,8 +3863,10 @@ class UIManager {
     };
     let fwTimer = 0;
 
+    let lastNow = 0;
     const loop = () => {
       const now = performance.now(), el = now - t0, W = cv.width, H = cv.height;
+      const dtf = lastNow ? Math.min(3, (now - lastNow) / 16.667) : 1; lastNow = now;   // frames-at-60Hz equivalent (2x-speed confetti on 120Hz screens otherwise)
       ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
       // starfield
       ctx.fillStyle = '#fff';
@@ -3834,17 +3886,17 @@ class UIManager {
           ctx.fillStyle = '#f6c652'; ctx.fillText(poem[i], W / 2, y);
         }
         ctx.font = '14px "Courier New", monospace'; ctx.fillStyle = '#888';
-        ctx.fillText('the credits roll...', W / 2, H - 30);
+        ctx.fillText('the credits roll...  (ESC to skip)', W / 2, H - 30);
       } else {
         // YOU WIN finale with confetti + fireworks
-        fwTimer += 1; if (fwTimer % 35 === 0) spawnFirework(W, H);
-        if (confetti.length < 240 && Math.random() < 0.8)
+        fwTimer += dtf; if (fwTimer >= 35) { fwTimer = 0; spawnFirework(W, H); }
+        if (confetti.length < 240 && Math.random() < 0.8 * Math.min(1, dtf))
           confetti.push({ x: Math.random()*W, y: -10, vx:(Math.random()-0.5)*2, vy:1+Math.random()*3,
                           col: COLORS[(Math.random()*COLORS.length)|0], s: 4+Math.random()*5, rot: Math.random()*7, vr:(Math.random()-0.5)*0.4 });
-        for (const c of confetti) { c.x += c.vx; c.y += c.vy; c.rot += c.vr;
+        for (const c of confetti) { c.x += c.vx * dtf; c.y += c.vy * dtf; c.rot += c.vr * dtf;
           ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.rot); ctx.fillStyle = c.col; ctx.fillRect(-c.s/2, -c.s/2, c.s, c.s); ctx.restore(); }
         for (let i = confetti.length - 1; i >= 0; i--) if (confetti[i].y > H + 20) confetti.splice(i, 1);
-        for (const f of fireworks) { f.x += f.vx; f.y += f.vy; f.vy += 0.04; f.life -= 0.012;
+        for (const f of fireworks) { f.x += f.vx * dtf; f.y += f.vy * dtf; f.vy += 0.04 * dtf; f.life -= 0.012 * dtf;
           if (f.life > 0) { ctx.globalAlpha = Math.max(0, f.life); ctx.fillStyle = f.col; ctx.fillRect(f.x, f.y, 3, 3); } }
         ctx.globalAlpha = 1;
         for (let i = fireworks.length - 1; i >= 0; i--) if (fireworks[i].life <= 0) fireworks.splice(i, 1);
@@ -3861,6 +3913,7 @@ class UIManager {
       this._winRAF = requestAnimationFrame(loop);
     };
     addEventListener('resize', resize);
+    this.skipWinPoem = () => { const el = performance.now() - t0; if (el < POEM_MS) { t0 = performance.now() - POEM_MS; return true; } return false; };
     this.stopWin = () => { if (this._winRAF) cancelAnimationFrame(this._winRAF); this._winRAF = null; removeEventListener('resize', resize); audio.stopFanfare(); screen.classList.add('hidden'); };
     loop();
   }
@@ -3915,6 +3968,11 @@ class SaveManager {
       gotPlushie: !!game._gotPlushie,
       collectedPlushies: [...game.world.collectedPlushieKeys],
       collectedNotes: [...game.world.collectedNoteKeys],
+      // the stalker's pressure state: without these a save/reload was an undocumented
+      // full reprieve (ratchet + QTE difficulty silently reset). Optional fields —
+      // old saves simply default to a fresh ratchet on load.
+      stalker: game.stalker ? { approach: game.stalker.approach, commit: !!game.stalker.commit } : null,
+      caughtCount: game._caughtCount || 0,
     };
     try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); return true; }
     catch (e) { console.warn('save failed', e); return false; }
@@ -3936,10 +3994,10 @@ class SaveManager {
 
 // a block dropped in the world that the player walks over to collect
 class DroppedItem {
-  constructor(x, y, z, id, count) {
+  constructor(x, y, z, id, count, meta) {
     this.pos = new Vec3(x, y, z);
     this.vel = new Vec3((Math.random() - 0.5) * 2.5, 2 + Math.random() * 2, (Math.random() - 0.5) * 2.5);
-    this.id = id; this.count = count; this.age = 0; this.alive = true;
+    this.id = id; this.count = count; this.meta = meta; this.age = 0; this.alive = true;
     this.half = 0.18; this.height = 0.36; this.onGround = false;
   }
 }
@@ -3998,23 +4056,19 @@ class Stalker {
     this.active = false;
     this.t = 0;
     this.aggro = 0; this.split = 0; this.mouth = 0;
-    this.observed = false; this.frozen = false;
     this._cos = 1; this._sin = 0;
-    this.hideTree = null; this.hideT = 0;
     this.burstT = 0; this.stepProg = 1; this.stepDur = 0.12;
     this.stepFrom = { x: 0, z: 0 }; this.stepTo = { x: 0, z: 0 };
-    this.jit = 0; this._whisperT = 3 + Math.random() * 4;
+    this._whisperT = 3 + Math.random() * 4;
     // behaviour state
-    this.obsT = 0;                            // how long the player has stared at it
     this.litT = 0;                            // how long the flashlight cone has been on it (banish trigger)
     this.lingerT = 10;                        // how long it lingers before withdrawing on its OWN volition
     this.hunting = false; this.huntWin = 0;   // "it comes for you" window
     this.huntT = 12 + Math.random() * 14;     // time until the next hunt (it tries fairly often)
-    this.lurkT = 0; this.lurkAng = 0;         // where it lurks (periphery/behind)
+    this.lurkT = 0;                           // hold-point re-latch timer
     this.lurkGoal = null;                     // LATCHED world hold-point (not live-tracked -> it parks, doesn't creep)
     // --- APPROACH-ON-LOOK ratchet: PERSISTS across despawn; only reset on the full-reprieve sites ---
     this.approach = 0;                        // 0..1; advances each look-banish, the dread is the trend line
-    this.approachAng = 0;                     // chosen rear/side world angle for the current appearance
     this.commit = false;                      // at the floor: the next appearance is the front-arc catch run
     this.twitch = 0; this.spasmT = 1 + Math.random() * 2; this.headJ = 0;  // erratic motion
     // mode machine: 'lurk' (at distance) | 'peek' (behind a trunk) | 'canopy' (hanging in the trees)
@@ -4031,6 +4085,8 @@ class Stalker {
   // so it doesn't spawn or lurk with its head buried inside a canopy
   _headClear(x, z) {
     const gx = Math.floor(x), gz = Math.floor(z), gh = this.world.heightAt(gx, gz);
+    if (gh <= SEA_LEVEL) return false;                       // never lurk standing on a lakebed/seabed
+    if (this.world.getBlock(gx, gh + 1, gz) === B.WATER) return false;   // ...or in a water-filled hollow
     for (let y = gh + 3; y <= gh + 6; y++) {
       const b = this.world.getBlock(gx, y, gz);
       if (b !== B.AIR && b !== B.WATER) return false;
@@ -4061,10 +4117,11 @@ class Stalker {
   // of the blocking tree instead of hiding behind it.
   _pickHoldPoint(player) {
     const dWant = this._holdDist();
-    let best = null;
-    for (let a = 0; a < 22; a++) {
+    let best = null, probes = 0;
+    for (let a = 0; a < 22 && probes < 60; a++) {                  // hard probe budget: each probe is a noise stack + raycast
       const ang = this._peripheryAngle(player);
-      for (let d = dWant; d >= 6; d -= 2) {
+      for (let d = dWant; d >= 6 && probes < 60; d -= 3) {
+        probes++;
         const x = player.pos.x + Math.sin(ang) * d, z = player.pos.z - Math.cos(ang) * d;
         if (this._headClear(x, z) && this._clearSight(player, x, z)) { if (!best || d > best.d) best = { x, z, ang, d }; break; }
       }
@@ -4094,7 +4151,6 @@ class Stalker {
       return;
     }
     const best = this._pickHoldPoint(player);                     // a periphery spot with clear line of sight
-    this.approachAng = best.ang;
     this.pos.set(best.x, 80, best.z);
     this.pos.y = this.world.groundAt(this.pos.x, this.pos.z, player.pos.y) + 1;
     this.active = true; this.aggro = 0; this.split = 0; this.mouth = 0; this.litT = 0;
@@ -4109,18 +4165,11 @@ class Stalker {
   // behind you, and always grant the full reprieve before it tries again.
   despawn() {
     this.active = false; this.loom = 0; this.drape = 0; this.crawl = 0; this.hang = 0;
-    this.hunting = false; this.huntWin = 0; this.huntT = 12 + Math.random() * 14; this.obsT = 0;
+    this.hunting = false; this.huntWin = 0; this.huntT = 12 + Math.random() * 14;
     // NOTE: do NOT reset this.approach/this.commit here. despawn() is the day-withdraw/
     // sleep/save/death/banish funnel; resetting here would erase the ratchet every dawn.
     // The ratchet is reset only at the explicit full-reprieve sites (console/sleep/death).
   }
-  teleportAway(player) {
-    const ang = Math.random() * 6.2832, d = 34 + Math.random() * 14;
-    this.pos.set(player.pos.x + Math.cos(ang) * d, 80, player.pos.z + Math.sin(ang) * d);
-    this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1;
-    this.aggro = 0; this.split = 0; this.mouth = 0; this.frozen = true; this.stepProg = 1;
-  }
-
   // is there clear line of sight from the eye to the creature?
   _lineClear(eye, dn, dist) {
     const r = raycastVoxel(this.world, eye, dn, Math.min(dist, 52));
@@ -4234,7 +4283,6 @@ class Stalker {
     const hl = Math.hypot(hx, hy, hz) + 1e-3;
     const dn = new Vec3(hx / hl, hy / hl, hz / hl);
     const dot = dn.dot(fwd), los = hl < 58 && this._lineClear(eye, dn, hl);
-    this.observed = dot > 0.6 && los;                  // (kept for ambience; looking no longer banishes)
     // ---- FLASHLIGHT BANISH: shining the lit cone DIRECTLY at it drives it off.
     // Looking does nothing now - only the beam does. Needs the torch lit, the creature
     // inside the bright cone (dot>0.92 ~ within ~23deg of aim), in range, and in view.
@@ -4264,6 +4312,18 @@ class Stalker {
     // pick a behaviour (hide behind a tree / hang in the canopy / lurk at range)
     this.modeT -= dt;
     if (this.modeT <= 0 && !this.hunting) this._pickMode(player);
+    // revalidate the latched tree ~1/s: if the player chopped the trunk, don't keep
+    // peeking from behind (or hanging from) a tree that no longer exists
+    if (this.tree && (this.mode === 'peek' || this.mode === 'canopy')) {
+      this._treeCheckT = (this._treeCheckT || 0) - dt;
+      if (this._treeCheckT <= 0) {
+        this._treeCheckT = 1;
+        const tx = Math.floor(this.tree.x), tz = Math.floor(this.tree.z);
+        let wood = false;
+        for (let y = this.tree.h + 1; y <= (this.tree.top || this.tree.h + 6); y++) if (this.world.getBlock(tx, y, tz) === B.WOOD) { wood = true; break; }
+        if (!wood) { this.modeT = 0; this._pickMode(player); }
+      }
+    }
 
     // ---- run the active mode -> a movement goal + pose ----
     let goalX, goalZ, smooth = false, fast = false, crawlRun = false;
@@ -4293,7 +4353,7 @@ class Stalker {
       // The ONLY thing that closes the distance is a look-banish (the ratchet).
       if (this.lurkT <= 0 || !this.lurkGoal) {
         const b = this._pickHoldPoint(player);          // re-latch a VISIBLE spot (clear line of sight)
-        this.lurkAng = b.ang; this.approachAng = b.ang; this.lurkT = 4 + Math.random() * 4;
+        this.lurkT = 4 + Math.random() * 4;
         this.lurkGoal = { x: b.x, z: b.z };
       }
       goalX = this.lurkGoal.x; goalZ = this.lurkGoal.z;
@@ -4375,8 +4435,7 @@ class Stalker {
   }
 
   skinName() {
-    if (this.hunting && this.aggro > 0.7) return 'arachnoid_angry';
-    if (this.hunting) return 'humanoid_angry';
+    if (this.hunting) return 'arachnoid_angry';   // hunts always run at full aggro
     return 'mysterious';                         // distant lurking form most of the time
   }
 
@@ -4745,7 +4804,7 @@ class Game {
     // ESC closes the console (focus-independent) / returns from the win screen
     addEventListener('keydown', (e) => {
       if (e.code === 'Escape' && this.consoleOpen) { this.closeConsole(); return; }
-      if (e.code === 'Escape' && this.state === 'won') { this.ui.stopWin(); this.quitToTitle(); }
+      if (e.code === 'Escape' && this.state === 'won') { if (this.ui.skipWinPoem && this.ui.skipWinPoem()) return; this.ui.stopWin(); this.quitToTitle(); }  // first ESC skips the poem, second quits
     });
   }
   _updateMenuButtons() {
@@ -4828,7 +4887,10 @@ class Game {
       row.innerHTML = `<label style="flex:1">${r.name}<br><span style="font-size:11px;color:#9c9">${ing}${gate}</span></label>`;
       const b = document.createElement('button'); b.className = 'btn small'; b.textContent = 'Craft';
       b.disabled = !can;
-      b.onclick = () => { if (this.crafting.craft(r, this.inventory, this.player, atTable)) { this.audio.play('craft'); this.refreshCraft(); } };
+      b.onclick = () => {
+        if (this.crafting.craft(r, this.inventory, this.player, atTable)) { this.audio.play('craft'); this.refreshCraft(); }
+        else if (this.crafting.canCraft(r, this.inventory, this.player, atTable)) this.ui.toast('No room in your inventory', 1.6);  // ingredients fine -> the output didn't fit
+      };
       row.appendChild(b); list.appendChild(row);
     }
     list.scrollTop = keepScroll;
@@ -4901,13 +4963,24 @@ class Game {
     let hit = -1;
     for (let i = 0; i < INV_SLOTS; i++) { const r = this._invSlotRect(i); if (mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h) { hit = i; break; } }
     if (hit < 0) return;
-    const slot = this.inventory.slots[hit], held = this._invHeld;
-    if (!held) {                                  // pick up the whole stack
-      if (slot.count > 0) { this._invHeld = { id: slot.id, count: slot.count, meta: slot.meta }; slot.id = 0; slot.count = 0; slot.meta = undefined; }
+    const slot = this.inventory.slots[hit], held = this._invHeld, rightBtn = button === 2;
+    if (!held) {
+      if (slot.count > 0) {
+        if (rightBtn && slot.count > 1 && !slot.meta) {          // right-click: pick up HALF the stack
+          const take = Math.ceil(slot.count / 2);
+          this._invHeld = { id: slot.id, count: take }; slot.count -= take;
+        } else {                                                 // left-click: the whole stack
+          this._invHeld = { id: slot.id, count: slot.count, meta: slot.meta }; slot.id = 0; slot.count = 0; slot.meta = undefined;
+        }
+      }
     } else if (slot.count === 0) {                // drop into an empty slot
-      slot.id = held.id; slot.count = held.count; slot.meta = held.meta; this._invHeld = null;
+      if (rightBtn && held.count > 1 && !held.meta) {            // right-click: place ONE
+        slot.id = held.id; slot.count = 1; held.count--;
+      } else {
+        slot.id = held.id; slot.count = held.count; slot.meta = held.meta; this._invHeld = null;
+      }
     } else if (slot.id === held.id && !slot.meta && !held.meta && slot.count < stackMax(slot.id)) {  // merge stacks
-      const room = stackMax(slot.id) - slot.count, a = Math.min(room, held.count);
+      const room = stackMax(slot.id) - slot.count, a = rightBtn ? Math.min(room, 1) : Math.min(room, held.count);
       slot.count += a; held.count -= a; if (held.count <= 0) this._invHeld = null;
     } else {                                      // swap
       this._invHeld = { id: slot.id, count: slot.count, meta: slot.meta };
@@ -4965,6 +5038,7 @@ class Game {
   // parse + run a slash command
   runCommand(raw) {
     const s = raw.replace(/^\//, '').trim();
+    if (!s) { this.closeConsole(); return; }         // Enter on the bare prompt just closes (not "Unknown command:")
     const a = s.split(/\s+/);
     const cmd = (a[0] || '').toLowerCase();
     const p = this.player, inv = this.inventory;
@@ -4994,7 +5068,9 @@ class Game {
       case 'give': {
         const id = nameToId(a[1]); const n = Math.min(999, Math.max(1, parseInt(a[2]) || 1));
         if (id == null) { err('Unknown item: ' + (a[1] || '')); break; }
-        inv.addItem(id, n); ok('Gave ' + n + ' ' + itemName(id));
+        const left = inv.addItem(id, n);
+        if (left > 0) err('Gave ' + (n - left) + ' ' + itemName(id) + ' — inventory full, ' + left + ' lost');
+        else ok('Gave ' + n + ' ' + itemName(id));
         break;
       }
       case 'tp': case 'teleport': {
@@ -5073,7 +5149,10 @@ class Game {
       this.inventory.selected = data.selected || 0;
     }
     this.mobs = new MobManager(this.world);
-    this.stalker = new Stalker(this.world); this._scare = 0; this._caughtCount = 0;
+    this.stalker = new Stalker(this.world); this._scare = 0;
+    // restore the stalker's pressure state (older saves lack these -> fresh defaults)
+    if (data.stalker) { this.stalker.approach = data.stalker.approach ?? 0; this.stalker.commit = !!data.stalker.commit; }
+    this._caughtCount = data.caughtCount ?? 0;
     this._stalkerSpawnT = 8 + Math.random() * 8;      // continuing INTO a night save: a short grace so it doesn't appear the instant you load
     this.activeNote = null; this._gotPlushie = !!data.gotPlushie;   // don't re-grant the first-note doll
     this._resetTorch();
@@ -5168,12 +5247,18 @@ class Game {
   // ====================== SPAWN + STREAMING =============================
   _findSpawn() {
     const w = this.world;
-    // would a tree originate at this column? (mirrors World.decorate)
+    // would a tree originate at this column? MIRRORS World.decorate exactly: grid
+    // placement, one hashed candidate per 4x4 cell (the old per-column mirror had
+    // drifted to different salts/thresholds and was checking a different function)
     const treeHere = (x, z) => {
-      const b = w.biomeAt(x, z), h = w.heightAt(x, z);
-      if (h <= SEA_LEVEL || h > 96) return false;
-      const r = w.hash2(x, z, 1);
-      return (b === BIOME.FOREST && r < 0.09) || (b === BIOME.PLAINS && r < 0.018);
+      const G = 4, gx = Math.floor(x / G), gz = Math.floor(z / G);
+      const wx = gx * G + 1 + (Math.floor(w.hash2(gx, gz, 21) * 2) % 2);
+      const wz = gz * G + 1 + (Math.floor(w.hash2(gx, gz, 22) * 2) % 2);
+      if (wx !== x || wz !== z) return false;                  // not this cell's candidate column
+      const h = w.heightAt(wx, wz);
+      if (h <= SEA_LEVEL + 1 || h > 96) return false;
+      const biome = w.biomeAtH(wx, wz, h), r = w.hash2(gx, gz, 23);
+      return (biome === BIOME.FOREST && r < 0.78) || (biome === BIOME.PLAINS && r < 0.16);
     };
     const tryPt = (x, z) => {
       const h = w.heightAt(x, z), b = w.biomeAt(x, z);
@@ -5269,15 +5354,22 @@ class Game {
       }
     cands.sort((a, b) => a[0] - b[0]);
     for (let i = 0; i < cands.length && budget > 0; i++) { this._meshChunk(cands[i][1]); budget--; }
-    // unload distant chunks (preserving their edits for saving)
-    for (const [k, ch] of [...this.world.chunks]) {
-      if (Math.max(Math.abs(ch.cx - ccx), Math.abs(ch.cz - ccz)) > R + 2) {
-        if (ch.edits) this.world.pendingEdits.set(k, Object.assign(this.world.pendingEdits.get(k) || {}, ch.edits));
-        this.renderer.freeChunkMesh(ch);
-        this.world.chunks.delete(k);
+    // unload distant chunks (preserving their edits for saving) — only when the
+    // player crosses a chunk boundary; iterating (and snapshotting) the whole chunk
+    // map every frame was pure GC churn while standing still
+    if (this._lastStreamCX !== ccx || this._lastStreamCZ !== ccz) {
+      this._lastStreamCX = ccx; this._lastStreamCZ = ccz;
+      const toDrop = [];
+      for (const [k, ch] of this.world.chunks) {
+        if (Math.max(Math.abs(ch.cx - ccx), Math.abs(ch.cz - ccz)) > R + 2) {
+          if (ch.edits) this.world.pendingEdits.set(k, Object.assign(this.world.pendingEdits.get(k) || {}, ch.edits));
+          this.renderer.freeChunkMesh(ch);
+          toDrop.push(k);
+        }
       }
+      for (const k of toDrop) this.world.chunks.delete(k);
+      this._pruneDecals();
     }
-    this._pruneDecals();
   }
   // keep the decal arrays bounded over a long session: drop entries far outside
   // the loaded area AND their dedupe keys, so each regenerates identically (from
@@ -5288,11 +5380,14 @@ class Game {
     const far = (this.settings.renderDistance + 4) * CHUNK_SX;
     const prune = (arr, keys, gx, gz) => {
       if (arr.length < 700) return arr;                 // only do work once an array gets big
-      return arr.filter(e => {
-        if (Math.abs(gx(e) - px) <= far && Math.abs(gz(e) - pz) <= far) return true;
-        if (e.key) keys.delete(e.key);
-        return false;
-      });
+      const kept = arr.filter(e => Math.abs(gx(e) - px) <= far && Math.abs(gz(e) - pz) <= far);
+      if (kept.length !== arr.length) {
+        // entries can SHARE a key (a footprint trail): only release a key once every
+        // entry carrying it is gone, or a half-pruned trail re-stamps duplicates on regen
+        const keepKeys = new Set(); for (const e of kept) if (e.key) keepKeys.add(e.key);
+        for (const e of arr) if (e.key && !keepKeys.has(e.key)) keys.delete(e.key);
+      }
+      return kept;
     };
     w.blood    = prune(w.blood,    w.bloodKeys,   e => e.x,  e => e.z);
     w.notes    = prune(w.notes,    w.noteKeys,    e => e.tx, e => e.tz);
@@ -5408,7 +5503,7 @@ class Game {
     // a bed is two side-by-side blocks - breaking one removes its partner
     if (id === B.BED) this._removeBedPair(t.x, t.y, t.z);
     // felling the trunk orphans the canopy: nearby leaves begin to wither
-    if (id === B.WOOD) { this._decayLeaves(t.x, t.y, t.z); this._dropHanged(t.x, t.y, t.z); }
+    if (id === B.WOOD) { this._decayLeaves(t.x, t.y, t.z); this._dropHanged(t.x, t.y, t.z); this._dropNotes(t.x, t.z); }
     // what the block drops
     let drop = id;
     if (id === B.GRASS) drop = B.DIRT;
@@ -5436,11 +5531,26 @@ class Game {
       if (this.world.getBlock(x + dx, y, z + dz) === B.BED) { this.world.setBlock(x + dx, y, z + dz, B.AIR); break; }
     }
   }
-  // when a trunk is cut, any leaves with no log within 4 blocks start to wither
+  // chopping a note's trunk drops the note as a pocketable item instead of leaving
+  // the parchment floating in mid-air where the bark used to be
+  _dropNotes(x, z) {
+    const w = this.world;
+    for (let i = w.notes.length - 1; i >= 0; i--) {
+      const n = w.notes[i];
+      if (n.tx === x && n.tz === z) {
+        this.mobs.drops.push(new DroppedItem(n.x, n.y - 0.3, n.z, ITEM.NOTE, 1, n.msg));
+        w.collectedNoteKeys.add(n.key);            // never re-stamped on regen (the tree is gone)
+        w.notes.splice(i, 1);
+      }
+    }
+  }
+  // when a trunk is cut, any leaves with no log within 4 blocks start to wither.
+  // The vertical sweep reaches further UP than the support radius: chopping a tall
+  // trunk bottom-up finishes at the lowest log, with the canopy up to ~7 above it.
   _decayLeaves(x, y, z) {
     this._leafDecay = this._leafDecay || [];
-    const R = 4;
-    for (let dy = -R; dy <= R; dy++) for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) {
+    const R = 4, RY = 8;
+    for (let dy = -R; dy <= RY; dy++) for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) {
       const lx = x + dx, ly = y + dy, lz = z + dz;
       if (this.world.getBlock(lx, ly, lz) !== B.LEAVES) continue;
       // is there still a log supporting this leaf within R blocks?
@@ -5663,13 +5773,13 @@ class Game {
     // inventory screen is open: only allow closing it
     if (this.invOpen) {
       if (this.input.wasPressed('KeyE') || this.input.wasPressed('Escape')) this.closeInventory();
-      this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); this._applyDread(0);
+      this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); this.audio.setAmbientNoise(0); this._applyDread(0);
       this.input.endFrame(); return;
     }
     // crafting menu is open: only allow closing it
     if (this.craftOpen) {
       if (this.input.wasPressed('KeyC') || this.input.wasPressed('Escape')) this.closeCraft();
-      this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); this._applyDread(0);
+      this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); this.audio.setAmbientNoise(0); this._applyDread(0);
       this.input.endFrame(); return;
     }
 
@@ -5940,6 +6050,7 @@ class Game {
     // damage() never sets .dead (only Player.update does); detect a fatal
     // mauling by health so the death screen fires now, not a frame later
     if (this.player.health <= 0) { this.player.die(this.audio); this._die(); return; }
+    this._scare = 1;                          // the shaken aftermath: the maw after-image + tightened fog decay out over the next second
     this.ui.toast('You tore free and scrambled away...', 2.4);
     this.state = 'playing';
     this._wasLocked = false;
@@ -6099,10 +6210,6 @@ class Game {
     }
     // bloody notes pinned to nearby trees (block atlas, 'note' tile)
     this._drawNotes(r, ccx, ccz, R);
-    // bloody splatters + footprints, but ONLY at night - they "wash away" by day
-    if (sc.daylight < 0.3) this._drawBlood(r, R);
-    // floating fog motes drifting in the murky air (more present as it darkens)
-    if (sc.daylight < 0.5) this._drawMotes(r);
     // cursed-plushie dolls (flat sprite props, alpha-cutout) sitting in the world
     this._drawPlushies(r, R);
     // rare hanged figures dangling in the trees
@@ -6119,6 +6226,12 @@ class Game {
         r.drawDynamicGlow(e.verts, e.idx);              // alpha-cutout: only the glow shows, no box rectangle
       }
     }
+
+    // depth-write-OFF translucents come AFTER every opaque prop: they don't write
+    // depth, so anything drawn later would overwrite them wherever they overlap
+    // (motes/blood used to vanish in front of the stalker and hanged figures)
+    if (sc.daylight < 0.3) this._drawBlood(r, R);       // night-only - they "wash away" by day
+    if (sc.daylight < 0.5) this._drawMotes(r);          // floating fog motes in the murky air
 
     // transparent geometry (water/glass/ice) back-to-front
     const transp = near.slice().sort((a, b) => b.d - a.d).map(o => o.ch);
