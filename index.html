@@ -158,7 +158,7 @@
     <button id="btnContinue" class="btn">Continue</button>
     <button id="btnNew"      class="btn">New World</button>
     <button id="btnSettings" class="btn">Settings</button>
-    <div class="ver">build 10 &bull; 2026-06-30 &bull; crawl-run animated + terrain-safe</div>
+    <div class="ver">build 11 &bull; 2026-07-01 &bull; craft-audit pass: 39 fixes</div>
     <div class="hint">Click "New World" to begin &nbsp;&bull;&nbsp; click the screen to capture the mouse</div>
   </div>
 
@@ -1322,6 +1322,7 @@ class Renderer {
     gl.uniform1f(this.uni.uForceAlpha, 1.0);        // ...force opaque (empty skin -> eldritch black)
     this.drawDynamic(verts, idx);
     gl.uniform1f(this.uni.uForceAlpha, 0.0);
+    gl.uniform1f(this.uni.uAlphaTest, 1.0);         // restore the opaque-pass resting state (was leaking 0.0 to later draws)
     gl.enable(gl.CULL_FACE);
     gl.bindTexture(gl.TEXTURE_2D, this.tex);         // restore the block atlas
   }
@@ -1354,9 +1355,8 @@ class Renderer {
     if (idx.length === 0) return;
     const gl = this.gl;
     gl.disable(gl.CULL_FACE);
-    gl.uniform1f(this.uni.uAlphaTest, 1.0);
+    gl.uniform1f(this.uni.uAlphaTest, 1.0);          // (1.0 is also the resting state — nothing to restore)
     this.drawDynamic(verts, idx);
-    gl.uniform1f(this.uni.uAlphaTest, 0.0);
     gl.enable(gl.CULL_FACE);
   }
 
@@ -1695,6 +1695,18 @@ class World {
 
   // biome from elevation + climate
   biomeAt(x, z) { return this.biomeAtH(x, z, this.heightAt(x, z)); }
+  // the ACTUAL ground surface from blocks: heightAt() is the raw noise height and
+  // ignores every player edit, so creatures placed with it float over dug pits and
+  // clip into builds. Scans a bounded column near a hint (or the noise height) for
+  // the highest solid cell; falls back to the noise height in ungenerated space.
+  groundAt(x, z, hintY) {
+    const gx = Math.floor(x), gz = Math.floor(z);
+    const noiseH = this.heightAt(gx, gz);
+    const base = Math.floor(hintY !== undefined ? hintY : noiseH);
+    for (let y = Math.max(base, noiseH) + 6; y >= Math.min(base, noiseH) - 8; y--)
+      if (Physics.solidAt(this, gx, y, gz)) return y;
+    return noiseH;
+  }
   // height-aware variant so callers that already have h don't recompute it
   biomeAtH(x, z, h) {
     if (h < SEA_LEVEL - 1) return BIOME.OCEAN;
@@ -1741,7 +1753,7 @@ class World {
       for (let lx = 0; lx < CHUNK_SX; lx++) {
         const wx = x0 + lx, wz = z0 + lz;
         const h = this.heightAt(wx, wz);
-        const biome = this.biomeAt(wx, wz);
+        const biome = this.biomeAtH(wx, wz, h);       // reuse the column height (biomeAt would recompute the whole noise stack)
         for (let y = 0; y < CHUNK_SY; y++) {
           let id = B.AIR;
           if (y === 0) {
@@ -1939,11 +1951,14 @@ class World {
       if (!ch.edits) ch.edits = {};
       ch.edits[ch.idx(lx, wy, lz)] = id;
     }
-    // border edits also dirty the neighbouring chunk's mesh
+    // border edits also dirty the neighbouring chunk's mesh — INCLUDING the diagonal
+    // at a corner, whose AO samples this cell (a corner edit left stale corner shading)
     if (lx === 0)            this._dirtyNeighbour(cx - 1, cz);
     if (lx === CHUNK_SX - 1) this._dirtyNeighbour(cx + 1, cz);
     if (lz === 0)            this._dirtyNeighbour(cx, cz - 1);
     if (lz === CHUNK_SZ - 1) this._dirtyNeighbour(cx, cz + 1);
+    if ((lx === 0 || lx === CHUNK_SX - 1) && (lz === 0 || lz === CHUNK_SZ - 1))
+      this._dirtyNeighbour(cx + (lx === 0 ? -1 : 1), cz + (lz === 0 ? -1 : 1));
   }
   _dirtyNeighbour(cx, cz) { const c = this.getChunk(cx, cz); if (c && c.generated) c.dirty = true; }
 }
@@ -2118,7 +2133,9 @@ class Player {
       if (this.sprintStamina <= 0) { this.sprintStamina = 0; this.sprintCD = this.sprintCDMax; this.sprinting = false; }
     } else {                                            // idle -> slow recharge
       this.sprinting = false;
-      this.sprintStamina = Math.min(this.sprintMax, this.sprintStamina + dt * 0.6);
+      // regen matches the burnout lockout rate (7s to full), so easing off early is
+      // never SLOWER than deliberately burning out for the instant refill
+      this.sprintStamina = Math.min(this.sprintMax, this.sprintStamina + dt * 1.0);
     }
     const sprinting = this.sprinting;
     this._sprint = sprinting;
@@ -2150,7 +2167,7 @@ class Player {
       // dive DOWN; otherwise you bob and sink slowly.
       this.vel.y -= GRAVITY * 0.18 * dt;        // gentle sink
       this.vel.y *= 0.84;                       // water drag
-      if (input.isDown('Space')) this.vel.y = inLava ? 1.8 : 4.2;        // kick to the surface
+      if (input.isDown('Space')) this.vel.y = inLava ? 3.4 : 4.2;        // kick to the surface (lava: sluggish but actually escapable)
       else if (sneaking) this.vel.y = -3.2;                              // dive
       if (this.vel.y < -6) this.vel.y = -6;
     } else {
@@ -2178,6 +2195,9 @@ class Player {
     if (!this.onGround && !this.inWater) {
       if (this.pos.y > this._fallPeak) this._fallPeak = this.pos.y;
     }
+    // liquid absorbs the fall: entering water/lava cancels any accumulated fall
+    // distance, so climbing out onto a bank never lands delayed cliff damage
+    if (this.inWater || this.headInWater || inLava) this._fallPeak = this.pos.y;
     if (this.onGround) {
       const fall = this._fallPeak - this.pos.y;
       if (fall > 3.0 && !this.inWater) {
@@ -2327,8 +2347,18 @@ class InputManager {
     document.addEventListener('pointerlockchange', () => {
       this.locked = (document.pointerLockElement === this.canvas);
     });
+    // alt-tab/blur: release every held key + button, or W/attack sticks on until re-pressed
+    addEventListener('blur', () => {
+      this.down.clear(); this.justPressed.clear();
+      this.leftHeld = false; this.rightHeld = false;
+      this.leftJust = false; this.rightJust = false; this.middleJust = false;
+      this.mdx = 0; this.mdy = 0; this.wheel = 0;
+    });
   }
-  requestLock() { this.canvas.requestPointerLock?.(); }
+  requestLock() {
+    // Chrome returns a promise that rejects if lock is re-requested too soon after Esc
+    try { const r = this.canvas.requestPointerLock?.(); if (r && r.catch) r.catch(() => {}); } catch (e) {}
+  }
   exitLock() { document.exitPointerLock?.(); }
   isDown(code) { return this.down.has(code); }
   wasPressed(code) { return this.justPressed.has(code); }
@@ -2509,6 +2539,9 @@ class AudioEngine {
     const node = el.cloneNode();                                  // a fresh element so overlapping screams don't cut each other
     node.volume = Math.max(0, Math.min(1, (0.12 + lv * lv * 0.92) * this.volume));  // faint far -> loud as you approach
     node.play().catch(() => {});
+    // track in-flight clones so death/pause/menu can actually silence a playing scream
+    this._screamNodes = (this._screamNodes || []).filter(n => !n.ended);
+    this._screamNodes.push(node);
   }
   startHorror() {
     if (this._horror) return;
@@ -2523,7 +2556,10 @@ class AudioEngine {
     };
     this._horror = setTimeout(step, 6000 + Math.random() * 6000);   // don't scream the instant night falls
   }
-  stopHorror() { if (this._horror) { clearTimeout(this._horror); this._horror = null; } this._horrorLv = 0; }
+  stopHorror() {
+    if (this._horror) { clearTimeout(this._horror); this._horror = null; } this._horrorLv = 0;
+    if (this._screamNodes) { for (const n of this._screamNodes) { try { n.pause(); } catch (e) {} } this._screamNodes = []; }
+  }
 
   // a triumphant looping fanfare for the victory screen
   startFanfare() {
@@ -2714,7 +2750,7 @@ class CraftingSystem {
     if (!this.canCraft(r, inv, player, atTable)) return false;
     // remove ingredients first (which frees slots), then try to place the output;
     // if it doesn't fit, roll back so ingredients are never destroyed
-    const snap = inv.slots.map(s => ({ id: s.id, count: s.count }));
+    const snap = inv.slots.map(s => ({ id: s.id, count: s.count, meta: s.meta }));  // keep meta: notes must survive a rollback
     r.in.forEach(ing => inv.removeItem(ing.id, ing.count));
     if (inv.addItem(r.out.id, r.out.count) !== 0) { inv.slots = snap; return false; }
     return true;
@@ -2772,11 +2808,13 @@ class MobManager {
     // only spawn where the world is actually generated (so the mob has ground)
     const ch = this.world.getChunk(Math.floor(x / CHUNK_SX), Math.floor(z / CHUNK_SZ));
     if (!ch || !ch.generated) return;
-    // find ground height by scanning down from the surface estimate
-    const h = this.world.heightAt(x, z);
+    // find the REAL ground (block-true, so player builds and dug pits are respected)
+    const h = this.world.groundAt(x, z);
     if (h <= SEA_LEVEL) return;               // no spawning in the sea
     const top = this.world.getBlock(x, h, z);
     if (top === B.WATER || top === B.LAVA) return;
+    // never spawn a critter inside solid space (e.g. under a player floor slab)
+    if (Physics.solidAt(this.world, x, h + 1, z) || Physics.solidAt(this.world, x, h + 2, z)) return;
     // only passive critters now (the Stalker is the only thing that hunts you)
     this.mobs.push(new Mob('critter', x + 0.5, h + 1, z + 0.5));
   }
@@ -2799,6 +2837,13 @@ class MobManager {
       const tx = Math.cos(m.dir), tz = Math.sin(m.dir);
       const sp = 1.8;
       m.vel.x = tx * sp; m.vel.z = tz * sp;
+      // knockback impulse from a hit rides ON TOP of the wander velocity (which is
+      // reassigned every frame above and used to silently eat the shove), decaying out
+      if (m.kb) {
+        m.vel.x += m.kb.x; m.vel.z += m.kb.z;
+        const kf = Math.max(0, 1 - dt * 3.2); m.kb.x *= kf; m.kb.z *= kf;
+        if (Math.abs(m.kb.x) + Math.abs(m.kb.z) < 0.05) m.kb = null;
+      }
       // face the way it's walking + advance the leg-swing phase
       const ml = Math.hypot(m.vel.x, m.vel.z);
       if (ml > 0.05) { m.fx = m.vel.x / ml; m.fz = m.vel.z / ml; }
@@ -2830,8 +2875,10 @@ class MobManager {
         o.vel.x = dx / d * 6; o.vel.z = dz / d * 6; o.vel.y = dy / d * 6;
         o.pos = o.pos.addScaled(o.vel, dt);
       } else {
-        o.vel.y -= GRAVITY * dt;
+        o.vel.y -= GRAVITY * dt; if (o.vel.y < -TERMINAL_V) o.vel.y = -TERMINAL_V;
         Physics.move(this.world, o, dt);
+        // ground friction so an orb that escaped the magnet doesn't skate off at 6 m/s
+        if (o.onGround) { const f = Math.max(0, 1 - dt * 10); o.vel.x *= f; o.vel.z *= f; }
       }
       if (o.age > 60) o.alive = false;                    // expire eventually
     }
@@ -2840,8 +2887,11 @@ class MobManager {
     // ---- dropped block items: fall, then get picked up on contact -----
     for (const it of this.drops) {
       it.age += dt;
-      it.vel.y -= GRAVITY * dt;
+      it.vel.y -= GRAVITY * dt; if (it.vel.y < -TERMINAL_V) it.vel.y = -TERMINAL_V;
       Physics.move(this.world, it, dt);
+      // ground friction: the spawn toss scatters in the air, then the drop STOPS where
+      // it lands (they used to glide across flat ground for their whole 60s life)
+      if (it.onGround) { const f = Math.max(0, 1 - dt * 12); it.vel.x *= f; it.vel.z *= f; }
       // no magnet: drops sit where they land and you collect them by walking over them
       const dx = player.pos.x - it.pos.x, dy = (player.pos.y + 0.8) - it.pos.y, dz = player.pos.z - it.pos.z;
       const d = Math.hypot(dx, dy, dz);
@@ -2875,8 +2925,9 @@ class MobManager {
       const dmg = (held && held.type === 'sword') ? held.dmg : 4;
       best.health -= dmg; best.flash = 0.18;
       audio && audio.play('hit');
-      // knockback
-      best.vel.x += dir.x * 4; best.vel.z += dir.z * 4; best.vel.y += 3;
+      // knockback: horizontal shove as a decaying impulse (wander AI reassigns vel.x/z
+      // every frame, so a raw vel += would be overwritten before physics ever ran)
+      best.kb = { x: dir.x * 4, z: dir.z * 4 }; best.vel.y += 3;
       if (best.health <= 0) { best.alive = false; this._onKill(best, inv); }
       return true;
     }
@@ -2884,8 +2935,12 @@ class MobManager {
   }
   _onKill(m, inv) {
     for (let i = 0; i < 2; i++) this.orbs.push(new XpOrb(m.pos.x, m.pos.y + 0.4, m.pos.z, 5));
-    // critters (animals) drop meat -> the main food source
-    if (inv) inv.addItem(ITEM.MEAT, 1 + (Math.random() < 0.5 ? 1 : 0));
+    // critters (animals) drop meat -> the main food source. Dropped as a WORLD item
+    // (not silently teleported into the bag): visible feedback, never lost to a full
+    // inventory, and walking over it plays the normal pickup sound.
+    this.drops.push(new DroppedItem(m.pos.x, m.pos.y + 0.4, m.pos.z, ITEM.MEAT, 1 + (Math.random() < 0.5 ? 1 : 0)));
+    // a burst of debris so the kill reads (the critter used to vanish the same frame)
+    if (window.GAME && GAME._spawnParticles) GAME._spawnParticles(m.pos.x, m.pos.y + 0.4, m.pos.z, B.REDSTONE);
   }
 
   /* Build one dynamic mesh of all mobs + orbs + drops for the renderer.
@@ -2915,11 +2970,20 @@ class MobManager {
       const bob = Math.sin(o.age * 6) * 0.06, a = o.age * 3;
       boxRotTile(v, i, o.pos.x, o.pos.y + 0.14 + bob, o.pos.z, Math.cos(a), Math.sin(a), -0.11, -0.11, -0.11, 0.22, 0.22, 0.22, gem, 1.6, 2);
     }
-    // dropped block items: small bobbing cubes of the block's own texture
+    // dropped block items: small bobbing cubes of the block's own texture. ITEM ids
+    // aren't in the block registry (faceTile fell through to tile 0 = grass-top for a
+    // dropped stick), so map them to a representative tile instead.
+    const ITEM_TILE = {
+      [ITEM.STICK]: 'wood_side', [ITEM.MEAT]: 'pig_snout', [ITEM.APPLE]: 'bed_blanket',
+      [ITEM.NOTE]: 'note', [ITEM.PLUSHIE]: 'cursed_plushie', [ITEM.EYE]: 'eye',
+      [ITEM.END_CRYSTAL]: 'xp_gem', [ITEM.NETHER_FRAME]: 'obsidian',
+    };
     for (const it of this.drops) {
       const bob = Math.sin(it.age * 4) * 0.08;
-      const tile = Blocks.faceTile(it.id, 2);
-      appendCube(v, i, it.pos.x - 0.18, it.pos.y + bob, it.pos.z - 0.18, 0.36, 0.36, 0.36, tile, 1.0, Blocks.get(it.id).anim || 0);
+      const tile = isBlockId(it.id) ? Blocks.faceTile(it.id, 2)
+        : Blocks._tileNames[ITEM_TILE[it.id]] !== undefined ? Blocks._tileNames[ITEM_TILE[it.id]]
+        : Blocks._tileNames['planks'];                          // tools & anything else: neutral wood
+      appendCube(v, i, it.pos.x - 0.18, it.pos.y + bob, it.pos.z - 0.18, 0.36, 0.36, 0.36, tile, 1.0, isBlockId(it.id) ? (Blocks.get(it.id).anim || 0) : 0);
     }
     return { verts: new Float32Array(v), idx: new Uint32Array(i) };
   }
@@ -3499,8 +3563,10 @@ class UIManager {
     ctx.fillStyle = '#fff'; ctx.font = 'bold 20px "Courier New", monospace';
     ctx.fillText(Math.round(q.fill * 100) + '%', cx, cy);
     ctx.textBaseline = 'top'; ctx.font = 'bold 19px "Courier New", monospace';
-    ctx.fillStyle = q.t % 0.4 < 0.2 ? '#ffffff' : '#ff9a9a';     // flashing prompt
-    this._text(ctx, 'MASH  [ SPACE ]  TO  WAKE', cx, cy + rad + 14);
+    // flashing prompt (drawn directly: _text() would overwrite the flash colour with white)
+    ctx.fillStyle = '#000'; ctx.fillText('MASH  [ SPACE ]  TO  WAKE', cx + 1, cy + rad + 15);
+    ctx.fillStyle = q.t % 0.4 < 0.2 ? '#ffffff' : '#ff9a9a';
+    ctx.fillText('MASH  [ SPACE ]  TO  WAKE', cx, cy + rad + 14);
     ctx.restore();
   }
   _text(ctx, s, x, y) {
@@ -3564,6 +3630,11 @@ class UIManager {
     this._miniTimer = 0;
     const ctx = this.miniCtx, S = 128, samples = 64, step = S / samples;
     const world = game.world, p = game.player;
+    // the map is a pure function of the player's position — skip the ~8k-noise-eval
+    // rebuild entirely while standing still (it used to burn a burst every 0.4s)
+    const kx = Math.floor(p.pos.x), kz = Math.floor(p.pos.z);
+    if (this._miniKX === kx && this._miniKZ === kz) return;
+    this._miniKX = kx; this._miniKZ = kz;
     const span = 96;                                   // world blocks shown across the map
     for (let j = 0; j < samples; j++) {
       for (let i = 0; i < samples; i++) {
@@ -4016,18 +4087,18 @@ class Stalker {
       const a = (Math.random() - 0.5) * 1.4;                       // ~+-40deg front arc
       const d = Math.max(APPROACH_NEAR, 10);
       this.pos.set(player.pos.x + Math.sin(player.yaw + a) * d, 80, player.pos.z - Math.cos(player.yaw + a) * d);
-      this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1;
+      this.pos.y = this.world.groundAt(this.pos.x, this.pos.z, player.pos.y) + 1;
       this.active = true; this.aggro = 1; this.split = 0.4; this.mouth = 0; this.litT = 0;
-      this.stepProg = 1; this.tree = null; this.hang = 0;
+      this.stepProg = 1; this.tree = null; this.hang = 0; this.drape = 0; this.crawl = 0;
       this.hunting = true; this.huntWin = 6 + Math.random() * 4; this.mode = 'lurk'; this.modeT = 1.5; this.lingerT = 99;
       return;
     }
     const best = this._pickHoldPoint(player);                     // a periphery spot with clear line of sight
     this.approachAng = best.ang;
     this.pos.set(best.x, 80, best.z);
-    this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1;
+    this.pos.y = this.world.groundAt(this.pos.x, this.pos.z, player.pos.y) + 1;
     this.active = true; this.aggro = 0; this.split = 0; this.mouth = 0; this.litT = 0;
-    this.stepProg = 1; this.tree = null; this.hang = 0; this.mode = 'lurk'; this.modeT = 1.5;
+    this.stepProg = 1; this.tree = null; this.hang = 0; this.drape = 0; this.crawl = 0; this.mode = 'lurk'; this.modeT = 1.5;
     this.lurkGoal = { x: best.x, z: best.z };                     // hold the visible spot it spawned at
     this.lingerT = 8 + Math.random() * 8;                         // it stays this long, then leaves on its own
     // NOTE: do NOT touch this.approach here - it persists across appearances.
@@ -4037,7 +4108,7 @@ class Stalker {
   // hunt through the intended front-arc trigger - never respawn mid-charge from
   // behind you, and always grant the full reprieve before it tries again.
   despawn() {
-    this.active = false; this.loom = 0;
+    this.active = false; this.loom = 0; this.drape = 0; this.crawl = 0; this.hang = 0;
     this.hunting = false; this.huntWin = 0; this.huntT = 12 + Math.random() * 14; this.obsT = 0;
     // NOTE: do NOT reset this.approach/this.commit here. despawn() is the day-withdraw/
     // sleep/save/death/banish funnel; resetting here would erase the ratchet every dawn.
@@ -4064,7 +4135,9 @@ class Stalker {
     const dx = tree.x - eye.x, dy = ty - eye.y, dz = tree.z - eye.z, dist = Math.hypot(dx, dy, dz) || 1;
     const r = raycastVoxel(this.world, eye, new Vec3(dx / dist, dy / dist, dz / dist), Math.min(dist + 1, 42));
     if (!r) return true;
-    return Math.hypot(r.x + 0.5 - eye.x, r.z + 0.5 - eye.z) >= dist - 2.0;   // first hit ~= this trunk
+    // compare 3D hit distance vs 3D target distance (a 2D compare wrongly rejected
+    // tall NEARBY trunks, where the vertical leg dominates the ray length)
+    return Math.hypot(r.x + 0.5 - eye.x, r.y + 0.5 - eye.y, r.z + 0.5 - eye.z) >= dist - 2.0;   // first hit ~= this trunk
   }
   // find a tree trunk near the player (to hide behind / hang from). Prefer one the
   // player can actually SEE, so peeking + canopy-hanging aren't lost behind the forest.
@@ -4126,12 +4199,12 @@ class Stalker {
       let ax = tree.x - player.pos.x, az = tree.z - player.pos.z; const al = Math.hypot(ax, az) || 1; ax /= al; az /= al;
       // SINK so the tall (~5-block) creature's head clears the canopy underside — its
       // crown (~feet+5.1) sits ~0.8 below the lowest leaf, so it's visible in EVERY tree
-      const ground = this.world.heightAt(Math.floor(tree.x), Math.floor(tree.z)) + 1;
+      const ground = this.world.groundAt(tree.x, tree.z, tree.h) + 1;
       const lb = tree.leafBottom || (ground + 4);
       this.peekY = Math.max(ground - 3.6, Math.min(ground, lb - 0.8 - 5.1));
       this.pos.set(tree.x + ax * 0.62, this.peekY, tree.z + az * 0.62);
     } else {                                          // ~16% (or no tree found) lurk at distance
-      this.mode = 'lurk'; this.hang = 0; this.tree = null; this.lurkGoal = null;   // re-latch a VISIBLE spot next frame
+      this.mode = 'lurk'; this.hang = 0; this.drape = 0; this.tree = null; this.lurkGoal = null;   // re-latch a VISIBLE spot next frame
     }
   }
   // cartoonish peek cycle: hidden -> snap out -> stare -> snap back
@@ -4153,7 +4226,10 @@ class Stalker {
 
     // ---- aim geometry: direction to its glowing head + clear line of sight ----
     const eye = player.eye(), fwd = player.forward();
-    const headY = this.hang ? this.pos.y - 1.2 : this.pos.y + 4.6;   // glowing face position (draped head hangs just below the leaves)
+    // glowing face position: draped head hangs just below the leaves; the crawl-run head
+    // leads LOW (~+0.85) — the banish cone must test where the player actually SEES it,
+    // or the beam aimed at the charging creature misses a phantom point 4.6 blocks up
+    const headY = this.hang ? this.pos.y - 1.2 : (this.crawl > 0.15 ? this.pos.y + 0.85 : this.pos.y + 4.6);
     const hx = this.pos.x - eye.x, hy = headY - eye.y, hz = this.pos.z - eye.z;
     const hl = Math.hypot(hx, hy, hz) + 1e-3;
     const dn = new Vec3(hx / hl, hy / hl, hz / hl);
@@ -4179,7 +4255,7 @@ class Stalker {
       // it charges FROM WHERE IT LURKS straight at you (no teleport). Only if it's parked
       // very far do we close the gap to ~14 blocks so the run isn't endless.
       const cdx = this.pos.x - player.pos.x, cdz = this.pos.z - player.pos.z, cl = Math.hypot(cdx, cdz) || 1;
-      if (cl > 14) { this.pos.x = player.pos.x + cdx / cl * 14; this.pos.z = player.pos.z + cdz / cl * 14; this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1; }
+      if (cl > 14) { this.pos.x = player.pos.x + cdx / cl * 14; this.pos.z = player.pos.z + cdz / cl * 14; this.pos.y = this.world.groundAt(this.pos.x, this.pos.z, player.pos.y) + 1; }
       this.stepProg = 1; this.split = 0.4; this.aggro = 1;
       if (audio) audio.whisper();                     // a low cue that something just shifted
     }
@@ -4268,10 +4344,10 @@ class Stalker {
       // footprint so it never sinks into a slope as it scrambles over rough terrain.
       const fx = Math.floor(this.pos.x), fz = Math.floor(this.pos.z);
       let gmax = -999;
-      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) { const gy = this.world.heightAt(fx + dx, fz + dz); if (gy > gmax) gmax = gy; }
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) { const gy = this.world.groundAt(fx + dx, fz + dz, this.pos.y - 1); if (gy > gmax) gmax = gy; }
       this.pos.y = gmax + 1;
     }
-    else this.pos.y = this.world.heightAt(Math.floor(this.pos.x), Math.floor(this.pos.z)) + 1;
+    else this.pos.y = this.world.groundAt(this.pos.x, this.pos.z, this.pos.y - 1) + 1;
 
     // erratic body spasms + an unsettling head tilt/twitch
     this.spasmT -= dt;
@@ -4636,7 +4712,7 @@ class Game {
     window.__onPlayerHurt = () => { this._hurtFlash = 0.35; };
     window.__onLevelUp = (lvl) => {
       this.ui.toast('Level ' + lvl + '!', 1.8);
-      if (lvl === 10) this.ui.toast('Level 10! Nether Frame crafting unlocked', 3);
+      if (lvl === 10) this.ui.toast('Level 10! Threshold Frame crafting unlocked', 3);
     };
 
     requestAnimationFrame(() => this.loop());
@@ -4736,7 +4812,9 @@ class Game {
     this.craftEls = { ov, list, hint: head.querySelector('#craftHint') };
   }
   refreshCraft() {
-    const list = this.craftEls.list; list.innerHTML = '';
+    const list = this.craftEls.list;
+    const keepScroll = list.scrollTop;                  // rebuilding the rows must not yank the list back to the top
+    list.innerHTML = '';
     const atTable = !!this._craftAtTable;
     if (this.craftEls.hint) this.craftEls.hint.textContent = atTable
       ? 'At a Workbench — full recipes available. Press C or Esc to close.'
@@ -4753,6 +4831,7 @@ class Game {
       b.onclick = () => { if (this.crafting.craft(r, this.inventory, this.player, atTable)) { this.audio.play('craft'); this.refreshCraft(); } };
       row.appendChild(b); list.appendChild(row);
     }
+    list.scrollTop = keepScroll;
   }
   openCraft(atTable) { this.craftOpen = true; this._craftAtTable = !!atTable; this.input.exitLock(); this.refreshCraft(); this.craftEls.ov.classList.remove('hidden'); }
   closeCraft() { this.craftOpen = false; this.craftEls.ov.classList.add('hidden'); if (this.state === 'playing') this.input.requestLock(); }
@@ -4984,7 +5063,7 @@ class Game {
     const pd = data.player;
     this.player.pos.set(pd.pos[0], pd.pos[1], pd.pos[2]);
     this.player.yaw = pd.yaw; this.player.pitch = pd.pitch;
-    this.player.health = pd.health; this.player.hunger = pd.hunger; this.player.saturation = pd.saturation || 5;
+    this.player.health = pd.health; this.player.hunger = pd.hunger; this.player.saturation = pd.saturation ?? 5;   // ?? — a saved 0 is legitimate
     this.player.xp = pd.xp; this.player.level = pd.level;
     this.player.spawn = new Vec3(pd.spawn[0], pd.spawn[1], pd.spawn[2]);
     this.inventory = new InventoryManager();
@@ -4994,7 +5073,8 @@ class Game {
       this.inventory.selected = data.selected || 0;
     }
     this.mobs = new MobManager(this.world);
-    this.stalker = new Stalker(this.world); this._scare = 0; this._stalkerSpawnT = 0; this._caughtCount = 0;
+    this.stalker = new Stalker(this.world); this._scare = 0; this._caughtCount = 0;
+    this._stalkerSpawnT = 8 + Math.random() * 8;      // continuing INTO a night save: a short grace so it doesn't appear the instant you load
     this.activeNote = null; this._gotPlushie = !!data.gotPlushie;   // don't re-grant the first-note doll
     this._resetTorch();
     this.time = data.time; this.day = data.day; this.particles = [];
@@ -5027,6 +5107,7 @@ class Game {
 
   _pause() {
     this.state = 'paused';
+    this.audio.setDread(0);                       // duck the dread drone on the pause menu (resumes from proximity next frame)
     document.getElementById('pauseMenu').classList.remove('hidden');
   }
   resume() {
@@ -5041,6 +5122,7 @@ class Game {
     this.input.exitLock();
     this._scare = 0;
     this.audio.stopDread(); this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0);
+    this.audio.stopHorror();                           // also cuts any scream clone still ringing over the death screen
     if (this.jumpscareVid) this.jumpscareVid.style.display = 'none';
     if (this.stalker) this.stalker.despawn();
     document.getElementById('tint').style.opacity = '0';
@@ -5051,6 +5133,8 @@ class Game {
     document.getElementById('deathScreen').classList.add('hidden');
     this.player.respawn();
     this._fallReset();
+    this._sleepFade = null; this._noteOverlay = null; // don't carry a mid-sleep fade or an open note across death
+    this.audio.startHorror();                         // _die() tore the scream scheduler down — restart it for the new life
     this._stalkerSpawnT = 10 + Math.random() * 10;   // brief reprieve after death
     if (this.stalker) { this.stalker.approach = 0; this.stalker.commit = false; }   // start the next night fresh
     this._caughtCount = 0;                            // QTE difficulty resets on death
@@ -5064,6 +5148,7 @@ class Game {
     this.world = null; this.player = null; this.mobs = null; this.stalker = null;
     this.audio.stopAmbient(); this.audio.stopDread(); this.audio.stopBreath(); this.audio.stopHeart(); this.audio.stopHorror();
     this._scare = 0; this.activeNote = null; this._resetTorch();
+    this._sleepFade = null; this._noteOverlay = null;  // a mid-sleep fade or open note must not leak into the next world
     this.state = 'menu';
     this.input.exitLock();
     this._hideAllOverlays();
@@ -5237,9 +5322,18 @@ class Game {
     if (inp.wasPressed('F5')) this.doSave();
     if (inp.wasPressed('F9')) this.doLoad();
 
-    // middle-click "pick block"
+    // middle-click "pick block": never destroys what you're holding — select a hotbar
+    // slot that already has the block, else fill the current/first EMPTY hotbar slot
     if (inp.middleJust && this.target && isBlockId(this.target.id)) {
-      const s = inv.selectedItem(); s.id = this.target.id; if (s.count < 1) s.count = 64;
+      const id = this.target.id;
+      let at = -1;
+      for (let i = 0; i < 9; i++) if (inv.slots[i].id === id && inv.slots[i].count > 0) { at = i; break; }
+      if (at >= 0) inv.setSelected(at);
+      else {
+        const sel = inv.selectedItem();
+        if (sel.id === 0 || sel.count < 1) { sel.id = id; sel.count = 64; sel.meta = undefined; }
+        else { for (let i = 0; i < 9; i++) if (inv.slots[i].id === 0 || inv.slots[i].count < 1) { inv.slots[i] = { id, count: 64 }; inv.setSelected(i); break; } }
+      }
     }
 
     // left click: attack a mob if one is in front, else it begins mining
@@ -5505,6 +5599,7 @@ class Game {
     f.t += dt;
     if (!f.applied && f.t >= 0.7) {
       f.applied = true;
+      if (this.time > 0.33) this.day++;                  // slept before midnight -> the skipped night still advances the day
       this.time = 0.33;                                  // wake at morning
       this.player.spawn = this.player.pos.copy();
       this.player.heal(6);
@@ -5525,6 +5620,7 @@ class Game {
     if (!this.save.hasSave()) { this.ui.toast('No save found', 1.4); return; }
     this.ui.toast('Loading save...', 1.2);
     for (const ch of this.world.chunks.values()) this.renderer.freeChunkMesh(ch);
+    this.state = 'menu';                    // idle the sim while the area streams back in (same as the menu Continue flow); _enterPlaying restores it
     this.continueWorld();
   }
 
@@ -5555,7 +5651,7 @@ class Game {
   update(dt) {
     this._frameDt = dt;                                 // for view-bob in render()
     // the command console steals all input while open (DOM field handles typing)
-    if (this.consoleOpen) { this.input.endFrame(); this._applyDread(0); this.audio.setBreath(0); this.audio.setHeartbeat(0); return; }   // don't freeze the blur/sound over the console
+    if (this.consoleOpen) { this.input.endFrame(); this._applyDread(0); this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); return; }   // don't freeze the blur/sound over the console
 
     // a lost pointer-lock (e.g. ESC) pauses the game
     if (this._wasLocked && !this.input.locked && !this.craftOpen && !this.invOpen) {
@@ -5567,18 +5663,18 @@ class Game {
     // inventory screen is open: only allow closing it
     if (this.invOpen) {
       if (this.input.wasPressed('KeyE') || this.input.wasPressed('Escape')) this.closeInventory();
-      this.audio.setBreath(0); this.audio.setHeartbeat(0);
+      this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); this._applyDread(0);
       this.input.endFrame(); return;
     }
     // crafting menu is open: only allow closing it
     if (this.craftOpen) {
       if (this.input.wasPressed('KeyC') || this.input.wasPressed('Escape')) this.closeCraft();
-      this.audio.setBreath(0); this.audio.setHeartbeat(0);
+      this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); this._applyDread(0);
       this.input.endFrame(); return;
     }
 
     this._handleInput(dt);
-    if (this.craftOpen || this.consoleOpen || this.invOpen) { this.audio.setBreath(0); this.audio.setHeartbeat(0); this.input.endFrame(); return; } // may have just opened
+    if (this.craftOpen || this.consoleOpen || this.invOpen) { this.audio.setBreath(0); this.audio.setHeartbeat(0); this.audio.setHorror(0); this.input.endFrame(); return; } // may have just opened
 
     // fixed-step physics so collision never tunnels
     this._acc += dt; let steps = 0;
@@ -5786,7 +5882,7 @@ class Game {
   }
   _enterDowned(stalker) {
     this.state = 'downed';
-    this.audio.setDread(1);
+    this.audio.startDread(); this.audio.setDread(1);   // the jumpscare path stopDread()s -> recreate the drone or the max-dread QTE bed is silent
     // each catch is slightly harder: every mash fills a little LESS, so it takes more
     // hammering to tear free (floored so it stays humanly possible).
     this._caughtCount = (this._caughtCount || 0) + 1;
@@ -5801,10 +5897,11 @@ class Game {
   _poseLoomer() {
     const s = this.stalker, p = this.player; if (!s) return;
     s.loom = 1;                                   // bend it over the downed player
+    s.crawl = 0; s.gait = 0; s.drape = 0;         // it CAUGHT you mid-crawl: rear up out of the crawl pose (crawl>0.15 would otherwise win buildMesh over the loom)
     const yaw = p.yaw;
     s.pos.x = p.pos.x + Math.sin(yaw) * 3.0;      // stand back so the bent-over head frames up-front
     s.pos.z = p.pos.z - Math.cos(yaw) * 3.0;
-    s.pos.y = this.world.heightAt(Math.floor(s.pos.x), Math.floor(s.pos.z)) + 1;
+    s.pos.y = this.world.groundAt(s.pos.x, s.pos.z, p.pos.y) + 1;
     const dx = p.pos.x - s.pos.x, dz = p.pos.z - s.pos.z, dl = Math.hypot(dx, dz) || 1;
     s._cos = -dz / dl; s._sin = dx / dl;
   }
@@ -5855,6 +5952,7 @@ class Game {
     this.audio.stopDread();
     this.player.health = 0;
     this.player.lastDamageReason = 'was dragged into the dark by The Obsessed';
+    this.player.die(this.audio);                  // same as every other fatal path: death sting + dead flag
     this._die();
   }
   // the closest note the player is looking at within reach (for reading)
@@ -5963,7 +6061,9 @@ class Game {
     const nightFogEnd = Math.min(dayFogEnd, 15);
     let fogEnd = lerp(nightFogEnd, dayFogEnd, sc.daylight);
     if (this._scare > 0 || this.state === 'downed') fogEnd *= 0.55;
-    const fogStart = fogEnd * (sc.daylight > 0.4 ? 0.5 : 0.18);
+    // smooth day<->night fog band (a hard 0.4 threshold made the fog wall POP every dusk/dawn)
+    const fogT = clamp((sc.daylight - 0.3) / 0.2, 0, 1);       // 0 at night ... 1 by day
+    const fogStart = fogEnd * (0.18 + 0.32 * fogT);
     const torch = this.torchOn ? 1 : 0;        // fog is now cleared only inside the cone (in-shader), not globally
     r.begin(proj, view, sc.horizon, fogStart, fogEnd, sc.daylight, this._clock, torch, eye, fwd);
 
